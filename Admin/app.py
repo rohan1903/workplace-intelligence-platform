@@ -106,10 +106,27 @@ def send_email(recipient_email, registration_link):
         print(f"❌ Email sending failed: {e}")
         return False
 
+def send_notification_email(recipient_email, subject, body):
+    """Send a single notification email (e.g. time exceeded alert)."""
+    if not (SENDER_EMAIL and SENDER_PASS):
+        return False
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = recipient_email
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASS)
+            server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+        return True
+    except Exception:
+        return False
+
 def trigger_invitation(email):
     """Create a unique registration token and send a registration link to the external web app."""
     invite_token = str(uuid.uuid4())
-    registration_base_url = os.getenv("REGISTRATION_APP_URL", "https://verdie-fictive-margret.ngrok-free.dev")
+    registration_base_url = os.getenv("REGISTRATION_APP_URL", "http://localhost:5001")
     registration_link = f"{registration_base_url}/?token={invite_token}"
 
     db.reference(f"invitations/{invite_token}").set({
@@ -123,217 +140,183 @@ def trigger_invitation(email):
 # Mock Data Functions (for demonstration without Firebase)
 # --------------------------
 def get_mock_visitors():
-    """Generate diverse mock visitor data for demonstration"""
-    
+    """Generate diverse mock visitor data covering normal and edge cases for analytics and occupancy."""
     mock_visitors = {}
-    
-    # More diverse data pools
+    base = datetime.now()
+
     first_names = ['John', 'Jane', 'Bob', 'Alice', 'Charlie', 'Diana', 'Ethan', 'Fiona', 'George', 'Hannah',
                    'Michael', 'Sarah', 'David', 'Emily', 'James', 'Olivia', 'William', 'Sophia', 'Robert', 'Emma',
                    'Richard', 'Isabella', 'Joseph', 'Mia', 'Thomas', 'Charlotte', 'Christopher', 'Amelia', 'Daniel', 'Harper',
                    'Matthew', 'Evelyn', 'Anthony', 'Abigail', 'Mark', 'Elizabeth', 'Donald', 'Sofia', 'Steven', 'Avery']
-    
     last_names = ['Doe', 'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez',
-                  'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin',
-                  'Lee', 'Thompson', 'White', 'Harris', 'Sanchez', 'Clark', 'Ramirez', 'Lewis', 'Robinson', 'Walker',
-                  'Young', 'Allen', 'King', 'Wright', 'Scott', 'Torres', 'Nguyen', 'Hill', 'Flores', 'Green']
-    
+                  'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin']
     purposes = ['Business Meeting', 'Job Interview', 'Client Presentation', 'Product Demo', 'Training Session',
                 'Delivery', 'Maintenance Work', 'Security Audit', 'Vendor Meeting', 'Consultation',
                 'Site Visit', 'Equipment Installation', 'Network Setup', 'Software Demo', 'Contract Signing',
                 'Team Collaboration', 'Project Review', 'Budget Discussion', 'Strategic Planning', 'Emergency Response']
-    
-    statuses = ['Registered', 'Approved', 'Checked-In', 'Checked-Out', 'Time Exceeded', 'Rescheduled', 'Rejected']
-    status_weights = [0.15, 0.20, 0.25, 0.20, 0.05, 0.10, 0.05]  # Weighted random selection
-    
     departments = ['IT', 'HR', 'Sales', 'Marketing', 'Finance', 'Operations', 'Engineering', 'Legal', 'Security', 'Facilities']
-    
-    employee_first = ['Sarah', 'Mike', 'Emily', 'David', 'Lisa', 'Jennifer', 'Chris', 'Amanda', 'Ryan', 'Jessica',
-                      'Kevin', 'Nicole', 'Brian', 'Michelle', 'Jason', 'Ashley', 'Justin', 'Stephanie', 'Brandon', 'Melissa']
+    employee_first = ['Sarah', 'Mike', 'Emily', 'David', 'Lisa', 'Jennifer', 'Chris', 'Amanda', 'Ryan', 'Jessica']
     employee_last = ['Johnson', 'Chen', 'Rodriguez', 'Kim', 'Anderson', 'Martinez', 'Taylor', 'Lee', 'White', 'Harris']
-    
-    companies = ['TechCorp', 'Global Solutions', 'Innovate Inc', 'Digital Dynamics', 'Cloud Systems', 'Data Analytics Co',
-                 'Smart Solutions', 'Future Tech', 'Enterprise Systems', 'NextGen Industries', 'Prime Consulting',
-                 'Elite Services', 'Apex Corporation', 'Summit Group', 'Vertex Technologies']
-    
-    base_date = datetime.now()
-    
-    # Generate 40-50 visitors for more variety
-    num_visitors = random.randint(40, 50)
-    
-    positive_feedback = [
-        "Great check-in experience, very smooth and fast.",
-        "Staff were helpful and the process was efficient.",
-        "Excellent security process, felt safe and welcomed.",
-        "Very good experience overall, minimal waiting time."
-    ]
-    neutral_feedback = [
-        "Process was okay, nothing unusual.",
-        "Average experience, all steps were completed.",
-        "The visit went as expected.",
-        "Everything was standard, no specific comments."
-    ]
-    negative_feedback = [
-        "Long waiting time at reception.",
-        "The process felt confusing at first.",
-        "Had trouble during check-out and needed assistance.",
-        "Could be improved with clearer instructions."
-    ]
+    companies = ['TechCorp', 'Global Solutions', 'Innovate Inc', 'Digital Dynamics', 'Cloud Systems', 'Smart Solutions']
+    blacklist_reasons = ['Security violation', 'Unauthorized access attempt', 'Previous misconduct', 'Policy violation', 'No reason provided']
+    positive_feedback = ["Great check-in experience, very smooth and fast.", "Staff were helpful and the process was efficient."]
+    neutral_feedback = ["Process was okay, nothing unusual.", "The visit went as expected."]
+    negative_feedback = ["Long waiting time at reception.", "The process felt confusing at first."]
 
-    for i in range(num_visitors):
-        visitor_id = f"visitor_{i+1}"
-        
-        # Random name combination
-        first_name = random.choice(first_names)
-        last_name = random.choice(last_names)
-        full_name = f"{first_name} {last_name}"
-        
-        # Varied visit dates (past 60 days)
-        days_ago = random.randint(0, 60)
-        hours_ago = random.randint(0, 23)
-        check_in = base_date - timedelta(days=days_ago, hours=hours_ago)
-        
-        # Status-based check-out logic
-        status = random.choices(statuses, weights=status_weights)[0]
-        
-        if status in ['Checked-Out', 'Time Exceeded']:
-            # For checked-out visitors, they stayed 1-6 hours
-            duration_hours = random.randint(1, 6)
-            check_out = check_in + timedelta(hours=duration_hours)
-            check_out_time = check_out.strftime('%Y-%m-%d %H:%M:%S')
-        elif status == 'Checked-In':
-            # Currently checked in - no check out yet
-            check_out_time = 'N/A'
-        else:
-            # Registered/Approved/Rejected - no check in yet
-            check_in = None
-            check_out_time = 'N/A'
-        
-        # Employee assignment
-        emp_first = random.choice(employee_first)
-        emp_last = random.choice(employee_last)
-        employee_name = f"{emp_first} {emp_last}"
-        
-        # Department based on purpose (some logic)
-        purpose = random.choice(purposes)
-        if 'IT' in purpose or 'Network' in purpose or 'Software' in purpose:
-            dept = 'IT'
-        elif 'Interview' in purpose or 'HR' in purpose:
-            dept = 'HR'
-        elif 'Sales' in purpose or 'Client' in purpose or 'Demo' in purpose:
-            dept = 'Sales'
-        elif 'Marketing' in purpose:
-            dept = 'Marketing'
-        elif 'Finance' in purpose or 'Budget' in purpose:
-            dept = 'Finance'
-        elif 'Maintenance' in purpose or 'Facilities' in purpose:
-            dept = 'Facilities'
-        elif 'Security' in purpose:
-            dept = 'Security'
-        else:
-            dept = random.choice(departments)
-        
-        # Blacklist logic (15% chance)
-        is_blacklisted = random.random() < 0.15
-        blacklist_reasons = [
-            'Security violation',
-            'Unauthorized access attempt',
-            'Previous misconduct',
-            'Policy violation',
-            'Suspicious behavior',
-            'No reason provided'
-        ] if is_blacklisted else 'No reason provided'
-        
-        # Email variations
-        email_domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'company.com', 'business.org', 'corp.net']
-        email = f"{first_name.lower()}.{last_name.lower()}@{random.choice(email_domains)}"
-        
-        # Phone number variations
-        phone_formats = [
-            f"+1-{random.randint(200, 999)}-{random.randint(100, 999)}-{random.randint(1000, 9999)}",
-            f"+44-{random.randint(10, 99)}-{random.randint(1000, 9999)}-{random.randint(1000, 9999)}",
-            f"+91-{random.randint(90000, 99999)}-{random.randint(10000, 99999)}",
-            f"+1-555-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
-        ]
-        
-        # Expected duration based on purpose
-        if 'Meeting' in purpose or 'Discussion' in purpose:
-            expected_duration = f"{random.randint(1, 2)} hours"
-        elif 'Interview' in purpose:
-            expected_duration = f"{random.randint(1, 3)} hours"
-        elif 'Demo' in purpose or 'Presentation' in purpose:
-            expected_duration = f"{random.randint(2, 4)} hours"
-        elif 'Training' in purpose:
-            expected_duration = f"{random.randint(4, 8)} hours"
-        else:
-            expected_duration = f"{random.randint(1, 4)} hours"
-        
-        # Create structure matching Firebase format
+    room_ids = list(get_mock_rooms().keys())
+
+    def make_visitor(visitor_id, full_name, status, check_in, check_out_time_str, expected_checkout_str,
+                     purpose, dept, employee_name, expected_duration, is_blacklisted, extra_visits=None, room_id=None):
+        if room_id is None and room_ids:
+            room_id = random.choice(room_ids)
+        first, last = full_name.split(' ', 1) if ' ' in full_name else (full_name, '')
+        email = f"{first.lower()}.{last.lower()}{random.randint(1,99)}@example.com"
         visit_data = {
             'check_in_time': check_in.strftime('%Y-%m-%d %H:%M:%S') if check_in else 'N/A',
-            'check_out_time': check_out_time,
+            'check_out_time': check_out_time_str,
             'status': status,
             'purpose': purpose,
             'employee_name': employee_name,
             'department': dept,
             'expected_duration': expected_duration,
-            'created_at': check_in.strftime('%Y-%m-%d %H:%M:%S') if check_in else (base_date - timedelta(days=days_ago)).strftime('%Y-%m-%d %H:%M:%S')
+            'expected_checkout_time': expected_checkout_str if expected_checkout_str else 'N/A',
+            'created_at': check_in.strftime('%Y-%m-%d %H:%M:%S') if check_in else base.strftime('%Y-%m-%d %H:%M:%S'),
+            'room_id': room_id or '',
         }
-        
-        # Some visitors have multiple visits (20% chance)
-        visits = {f"visit_{i+1}": visit_data}
-        if random.random() < 0.2 and i > 5:  # Don't do this for first few visitors
-            # Add a previous visit
-            prev_days = random.randint(10, 45)
-            prev_check_in = base_date - timedelta(days=prev_days, hours=random.randint(9, 17))
-            prev_check_out = prev_check_in + timedelta(hours=random.randint(1, 3))
-            visits[f"visit_{i+1}_prev"] = {
-                'check_in_time': prev_check_in.strftime('%Y-%m-%d %H:%M:%S'),
-                'check_out_time': prev_check_out.strftime('%Y-%m-%d %H:%M:%S'),
-                'status': 'Checked-Out',
-                'purpose': random.choice(purposes),
-                'employee_name': employee_name,
-                'department': dept,
-                'expected_duration': f"{random.randint(1, 3)} hours",
-                'created_at': prev_check_in.strftime('%Y-%m-%d %H:%M:%S')
-            }
-        
-        # Mock feedback entries for sentiment analysis page
+        visits = {f"visit_{visitor_id}": visit_data}
+        if extra_visits:
+            visits.update(extra_visits)
         feedbacks = {}
-        feedback_count = random.randint(0, 3)
-        for j in range(feedback_count):
-            feedback_id = f"feedback_{j+1}"
-            sentiment_bucket = random.choices(
-                ["positive", "neutral", "negative"],
-                weights=[0.5, 0.3, 0.2]
-            )[0]
-            if sentiment_bucket == "positive":
-                feedback_text = random.choice(positive_feedback)
-            elif sentiment_bucket == "negative":
-                feedback_text = random.choice(negative_feedback)
-            else:
-                feedback_text = random.choice(neutral_feedback)
-
-            feedback_time = base_date - timedelta(days=random.randint(0, 30), hours=random.randint(0, 23))
-            feedbacks[feedback_id] = {
-                "text": feedback_text,
-                "timestamp": feedback_time.strftime('%Y-%m-%d %H:%M:%S'),
-                "visitor_id": visitor_id
-            }
-
-        mock_visitors[visitor_id] = {
+        for j in range(random.randint(0, 2)):
+            sentiment = random.choice(["positive", "neutral", "negative"])
+            text = random.choice(positive_feedback if sentiment == "positive" else negative_feedback if sentiment == "negative" else neutral_feedback)
+            feedbacks[f"feedback_{j+1}"] = {"text": text, "timestamp": (base - timedelta(days=random.randint(0, 14))).strftime('%Y-%m-%d %H:%M:%S'), "visitor_id": visitor_id}
+        rec = {
             'basic_info': {
                 'name': full_name,
-                'contact': random.choice(phone_formats),
+                'contact': f"+1-555-{random.randint(100,999)}-{random.randint(1000,9999)}",
                 'email': email,
                 'blacklisted': is_blacklisted,
                 'blacklist_reason': random.choice(blacklist_reasons) if is_blacklisted else 'No reason provided',
-                'company': random.choice(companies) if random.random() < 0.4 else 'N/A'
+                'company': random.choice(companies) if random.random() < 0.5 else 'N/A',
             },
             'visits': visits,
-            'feedbacks': feedbacks
+            'feedbacks': feedbacks,
         }
-    
+        rec['name'] = full_name
+        rec['check_in_time'] = visit_data['check_in_time']
+        rec['check_out_time'] = visit_data['check_out_time']
+        rec['status'] = status
+        rec['expected_checkout_time'] = expected_checkout_str or 'N/A'
+        rec['purpose'] = purpose
+        rec['employee_name'] = employee_name
+        rec['department'] = dept
+        rec['expected_duration'] = expected_duration
+        rec['blacklisted'] = is_blacklisted
+        rec['room_id'] = room_id or ''
+        return rec
+
+    idx = 0
+    emp = lambda: f"{random.choice(employee_first)} {random.choice(employee_last)}"
+    dept = lambda: random.choice(departments)
+    name = lambda: f"{random.choice(first_names)} {random.choice(last_names)}"
+    purpose = lambda: random.choice(purposes)
+
+    # --- Scenario 1: Currently checked in (last 24h) — for occupancy and "Currently Active" ---
+    for hours_ago in [0, 1, 2, 5, 8, 12, 18, 23]:
+        idx += 1
+        check_in = base - timedelta(hours=hours_ago)
+        expected_checkout = check_in + timedelta(hours=3)
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), 'Checked-In', check_in, 'N/A', expected_checkout.strftime('%Y-%m-%d %H:%M:%S'),
+            purpose(), dept(), emp(), '2 hours', False)
+
+    # --- Scenario 2: Time exceeded (checked in, expected checkout in past) ---
+    for _ in range(3):
+        idx += 1
+        check_in = base - timedelta(hours=4)
+        expected_checkout = base - timedelta(hours=2)
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), 'Checked-In', check_in, 'N/A', expected_checkout.strftime('%Y-%m-%d %H:%M:%S'),
+            purpose(), dept(), emp(), '1 hour', False)
+
+    # --- Scenario 3: Checked out in last 24h (various spans for occupancy-over-time) ---
+    for (start_h, stay_h) in [(23, 1), (20, 2), (18, 3), (12, 4), (10, 2), (6, 3), (4, 2), (2, 1), (1, 0)]:
+        idx += 1
+        check_in = base - timedelta(hours=start_h)
+        check_out = check_in + timedelta(hours=max(stay_h, 1))
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
+            purpose(), dept(), emp(), f"{max(stay_h,1)} hours", False)
+
+    # --- Scenario 4: Registered, Approved, Rejected, Rescheduled (no check-in) ---
+    for status in ['Registered', 'Registered', 'Approved', 'Approved', 'Rejected', 'Rescheduled']:
+        idx += 1
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), status, None, 'N/A', 'N/A', purpose(), dept(), emp(), '1 hour', False)
+        mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
+
+    # --- Scenario 5: Blacklisted mix ---
+    for _ in range(4):
+        idx += 1
+        check_in = base - timedelta(hours=random.randint(1, 20)) if random.random() < 0.5 else None
+        if check_in:
+            check_out = check_in + timedelta(hours=random.randint(1, 3))
+            mock_visitors[f"visitor_{idx}"] = make_visitor(
+                idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
+                purpose(), dept(), emp(), '2 hours', True)
+        else:
+            mock_visitors[f"visitor_{idx}"] = make_visitor(
+                idx, name(), 'Registered', None, 'N/A', 'N/A', purpose(), dept(), emp(), '1 hour', True)
+            mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
+
+    # --- Scenario 6: Multiple visits (recurring visitors) ---
+    for _ in range(5):
+        idx += 1
+        check_in = base - timedelta(hours=random.randint(2, 22))
+        check_out = check_in + timedelta(hours=random.randint(1, 4))
+        prev_visit = {
+            f"visit_{idx}_prev": {
+                'check_in_time': (base - timedelta(days=random.randint(5, 30), hours=random.randint(9, 17))).strftime('%Y-%m-%d %H:%M:%S'),
+                'check_out_time': (base - timedelta(days=random.randint(5, 30), hours=random.randint(6, 14))).strftime('%Y-%m-%d %H:%M:%S'),
+                'status': 'Checked-Out', 'purpose': purpose(), 'employee_name': emp(), 'department': dept(),
+                'expected_duration': '2 hours', 'expected_checkout_time': 'N/A', 'created_at': (base - timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S'),
+            }
+        }
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
+            purpose(), dept(), emp(), '2 hours', False, extra_visits=prev_visit)
+
+    # --- Scenario 7: Extra random visitors for volume and variety ---
+    for _ in range(25):
+        idx += 1
+        days_ago = random.randint(0, 30)
+        hours_ago = random.randint(0, 23)
+        check_in = base - timedelta(days=days_ago, hours=hours_ago)
+        status = random.choices(
+            ['Registered', 'Approved', 'Checked-In', 'Checked-Out', 'Time Exceeded', 'Rescheduled', 'Rejected'],
+            weights=[0.12, 0.15, 0.22, 0.28, 0.05, 0.10, 0.08]
+        )[0]
+        if status in ['Checked-Out', 'Time Exceeded']:
+            duration_h = random.randint(1, 6)
+            check_out = check_in + timedelta(hours=duration_h)
+            check_out_str = check_out.strftime('%Y-%m-%d %H:%M:%S')
+            expected_checkout_str = 'N/A'
+        elif status == 'Checked-In':
+            check_out_str = 'N/A'
+            expected_checkout_str = (check_in + timedelta(hours=random.randint(1, 4))).strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            check_in = None
+            check_out_str = 'N/A'
+            expected_checkout_str = 'N/A'
+        mock_visitors[f"visitor_{idx}"] = make_visitor(
+            idx, name(), status,
+            check_in, check_out_str, expected_checkout_str,
+            purpose(), dept(), emp(), f"{random.randint(1,4)} hours",
+            random.random() < 0.1)
+        if check_in is None:
+            mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
+
     return mock_visitors
 
 def get_mock_employees():
@@ -392,6 +375,55 @@ def get_mock_employees():
         }
     
     return mock_employees
+
+def get_mock_rooms():
+    """Default meeting rooms for mock mode (name, capacity, floor, amenities)."""
+    return {
+        'room_1': {'name': 'Conference A', 'capacity': 10, 'floor': 1, 'amenities': 'Projector, Whiteboard'},
+        'room_2': {'name': 'Conference B', 'capacity': 6, 'floor': 1, 'amenities': 'TV, Video call'},
+        'room_3': {'name': 'Meeting Room 101', 'capacity': 4, 'floor': 1, 'amenities': 'Whiteboard'},
+        'room_4': {'name': 'Meeting Room 102', 'capacity': 4, 'floor': 1, 'amenities': 'None'},
+        'room_5': {'name': 'Board Room', 'capacity': 20, 'floor': 2, 'amenities': 'Projector, Video call, Whiteboard'},
+    }
+
+# In-memory cache for mock meeting rooms (CRUD updates this; resets on app restart)
+_mock_rooms_cache = None
+
+def get_meeting_rooms():
+    """Return all meeting rooms (mock or Firebase)."""
+    global _mock_rooms_cache
+    if USE_MOCK_DATA:
+        if _mock_rooms_cache is None:
+            _mock_rooms_cache = dict(get_mock_rooms())
+        return _mock_rooms_cache
+    ref = db.reference('meeting_rooms')
+    return ref.get() or {}
+
+def save_meeting_room(room_id, data):
+    """Create or update a meeting room. data: name, capacity, floor, amenities."""
+    global _mock_rooms_cache
+    payload = {
+        'name': str(data.get('name', '')).strip() or 'Unnamed',
+        'capacity': int(data.get('capacity', 0)) if data.get('capacity') not in (None, '') else 0,
+        'floor': str(data.get('floor', '')).strip() or '0',
+        'amenities': str(data.get('amenities', '')).strip() or ''
+    }
+    if USE_MOCK_DATA:
+        if _mock_rooms_cache is None:
+            _mock_rooms_cache = dict(get_mock_rooms())
+        _mock_rooms_cache[room_id] = payload
+        return
+    db.reference(f'meeting_rooms/{room_id}').set(payload)
+
+def delete_meeting_room(room_id):
+    """Remove a meeting room."""
+    global _mock_rooms_cache
+    if USE_MOCK_DATA:
+        if _mock_rooms_cache is None:
+            _mock_rooms_cache = dict(get_mock_rooms())
+        _mock_rooms_cache.pop(room_id, None)
+        return
+    db.reference(f'meeting_rooms/{room_id}').delete()
 
 # --------------------------
 # Analytics Functions
@@ -475,7 +507,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Admin Panel - Visitor Management System</title>
+        <title>Admin Panel - Office Workplace Intelligence Platform</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -535,7 +567,7 @@ def index():
                     <i class="fas fa-shield-alt text-white text-3xl"></i>
                 </div>
                 <h1 class="text-4xl md:text-5xl font-bold text-white mb-3">Admin Dashboard</h1>
-                <p class="text-white/80 text-lg">Visitor Management System Control Center</p>
+                <p class="text-white/80 text-lg">Workplace Intelligence Control Center</p>
             </div>
 
             <!-- Main Navigation Cards -->
@@ -650,6 +682,24 @@ def index():
                             <i class="fas fa-arrow-right group-hover:translate-x-1 transition-transform"></i>
                         </div>
                     </a>
+
+                    <!-- Meeting Rooms Card -->
+                    <a href="{{ url_for('rooms_list') }}" 
+                       class="card-hover bg-white rounded-2xl p-6 shadow-xl border border-gray-100 hover:border-teal-200 group w-full max-w-md">
+                        <div class="flex items-center mb-4">
+                            <div class="w-12 h-12 bg-teal-100 rounded-xl flex items-center justify-center group-hover:bg-teal-500 transition-colors">
+                                <i class="fas fa-door-open text-teal-600 group-hover:text-white text-xl"></i>
+                            </div>
+                            <div class="ml-4">
+                                <h3 class="text-xl font-semibold text-gray-800">Meeting Rooms</h3>
+                                <p class="text-gray-600 text-sm">Rooms, capacity, and utilization</p>
+                            </div>
+                        </div>
+                        <div class="flex justify-between items-center text-sm text-gray-500">
+                            <span>Add, edit, delete rooms</span>
+                            <i class="fas fa-arrow-right group-hover:translate-x-1 transition-transform"></i>
+                        </div>
+                    </a>
                 </div>
             </div>
 
@@ -657,7 +707,7 @@ def index():
             <div class="text-center mt-8">
                 <p class="text-white/60 text-sm">
                     <i class="fas fa-shield-alt mr-2"></i>
-                    Secure Visitor Management System v2.0
+                    Office Workplace Intelligence Platform v2.0
                 </p>
             </div>
         </div>
@@ -702,7 +752,7 @@ def upload_invitations_page():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Upload Invitations - VMS</title>
+        <title>Upload Invitations - Workplace Intelligence</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
@@ -877,7 +927,7 @@ def admin_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>VMS Analytics Dashboard</title>
+        <title>Workspace Intelligence Analytics Dashboard</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -916,7 +966,7 @@ def admin_dashboard():
             <div class="max-w-8xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div class="flex justify-between items-center py-4">
                     <div>
-                        <h1 class="text-2xl font-bold text-gray-900">Visitor Management Analytics</h1>
+                        <h1 class="text-2xl font-bold text-gray-900">Workspace Intelligence Analytics</h1>
                         <p class="text-sm text-gray-600">Comprehensive visitor insights with time range filters</p>
                     </div>
                     <div class="flex items-center gap-4">
@@ -1049,7 +1099,7 @@ def admin_dashboard():
                             </div>
                             <div class="ml-4">
                                 <p class="text-sm font-medium text-gray-600">Currently Active</p>
-                                <p class="text-2xl font-bold text-gray-900">{{ analytics.currently_checked_in }}</p>
+                                <p class="text-2xl font-bold text-gray-900"><span id="occupancy-count">{{ analytics.currently_checked_in }}</span></p>
                             </div>
                         </div>
                         <div class="text-green-500">
@@ -1229,6 +1279,40 @@ def admin_dashboard():
                             <canvas id="hourlyChart"></canvas>
                         </div>
                     </div>
+
+                    <!-- Occupancy over time (last 24 hours) -->
+                    <div class="chart-container p-6">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-lg font-semibold text-gray-900">Occupancy over time (last 24 hours)</h3>
+                            <div class="text-sm text-gray-500 flex items-center">
+                                <i class="fas fa-users mr-2"></i>
+                                Rolling 24h
+                            </div>
+                        </div>
+                        <p class="text-sm text-gray-500 mb-4">Number of visitors present in the building in each hour (checked in and not yet checked out).</p>
+                        <div class="h-80">
+                            <canvas id="occupancyOverTimeChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Occupancy over selected date/range -->
+                    <div class="chart-container p-6">
+                        <div class="flex justify-between items-center mb-2">
+                            <h3 class="text-lg font-semibold text-gray-900">Occupancy over selected period</h3>
+                            <div class="text-sm text-gray-500 flex items-center">
+                                <i class="fas fa-calendar-alt mr-2"></i>
+                                {{ analytics.filter_description }}
+                            </div>
+                        </div>
+                        <p class="text-sm text-gray-500 mb-4">Visitors present in the building by hour (single day) or by day (multi-day). Uses the current time filter above.</p>
+                        <div class="flex gap-2 mb-2">
+                            <button type="button" onclick="exportOccupancyCSV('last24')" class="text-sm text-purple-600 hover:underline">Export last 24h CSV</button>
+                            <button type="button" onclick="exportOccupancyCSV('period')" class="text-sm text-purple-600 hover:underline">Export selected period CSV</button>
+                        </div>
+                        <div class="h-80">
+                            <canvas id="occupancyOverTimePeriodChart"></canvas>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1336,9 +1420,14 @@ def admin_dashboard():
                                     <p class="text-xs text-red-600 font-semibold">Exceeded by {{ visitor.exceeded_by }}</p>
                                 </div>
                             </div>
-                            <div class="text-right">
-                                <p class="text-sm font-bold text-red-600">{{ visitor.duration }}</p>
-                                <p class="text-xs text-gray-400">Expected: {{ visitor.expected_duration }}</p>
+                            <div class="text-right flex items-center gap-3">
+                                <div>
+                                    <p class="text-sm font-bold text-red-600">{{ visitor.duration }}</p>
+                                    <p class="text-xs text-gray-400">Expected: {{ visitor.expected_duration }}</p>
+                                </div>
+                                {% if visitor.visitor_id and visitor.employee_name %}
+                                <button type="button" class="notify-host-btn px-3 py-1.5 text-xs font-medium bg-amber-600 hover:bg-amber-700 text-white rounded" data-visitor-id="{{ visitor.visitor_id }}">Notify host</button>
+                                {% endif %}
                             </div>
                         </div>
                         {% endfor %}
@@ -1347,6 +1436,41 @@ def admin_dashboard():
                             <i class="fas fa-check-circle text-2xl mb-2"></i>
                             <p>No time exceeded visitors</p>
                         </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            <!-- Room utilization -->
+            <div class="mt-8">
+                <div class="chart-container p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-semibold text-gray-900">Room utilization</h3>
+                        <div class="flex items-center gap-2">
+                            <button type="button" onclick="exportRoomUtilizationCSV()" class="text-sm text-teal-600 hover:underline">Export CSV</button>
+                            <a href="/rooms" class="text-sm text-teal-600 hover:underline">Manage rooms</a>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-500 mb-4">Visits per meeting room in the selected period.</p>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
+                                    <th class="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Visits</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-200">
+                                {% for r in (analytics.get('room_utilization_analytics') or []) %}
+                                <tr class="hover:bg-gray-50">
+                                    <td class="px-4 py-2 text-sm font-medium text-gray-900">{{ r.room_name or r.room_id }}</td>
+                                    <td class="px-4 py-2 text-sm text-right text-gray-600">{{ r.visit_count }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% if not (analytics.get('room_utilization_analytics')) %}
+                        <p class="py-4 text-gray-500 text-sm">No room data in this period. <a href="/rooms" class="text-teal-600 hover:underline">Add rooms</a> and link visits to them.</p>
                         {% endif %}
                     </div>
                 </div>
@@ -1375,6 +1499,8 @@ def admin_dashboard():
                 // Hourly Distribution Chart
                 initializeHourlyChart('hourlyChart');
                 initializeHourlyChart('trendsChartSingle');
+                initializeOccupancyOverTimeChart();
+                initializeOccupancyPeriodChart();
             }
 
             function initializePurposeChart(canvasId) {
@@ -1475,6 +1601,57 @@ def admin_dashboard():
                 });
             }
 
+            function initializeOccupancyOverTimeChart() {
+                const occ = {{ (analytics.get('occupancy_over_time_last24') or {'labels': [], 'data': []})|tojson }};
+                const ctx = document.getElementById('occupancyOverTimeChart');
+                if (!ctx) return;
+                new Chart(ctx.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                        labels: occ.labels || [],
+                        datasets: [{
+                            label: 'Occupancy',
+                            data: occ.data || [],
+                            borderColor: '#10B981',
+                            backgroundColor: 'rgba(16, 185, 129, 0.15)',
+                            borderWidth: 3,
+                            fill: true,
+                            tension: 0.4,
+                            pointBackgroundColor: '#10B981',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 2,
+                            pointRadius: 4
+                        }]
+                    },
+                    options: getChartOptions('Occupancy over time (last 24h)', true)
+                });
+            }
+            function initializeOccupancyPeriodChart() {
+                const occ = {{ (analytics.get('occupancy_over_time_period') or {'labels': [], 'data': []})|tojson }};
+                const ctx = document.getElementById('occupancyOverTimePeriodChart');
+                if (!ctx) return;
+                new Chart(ctx.getContext('2d'), {
+                    type: 'line',
+                    data: {
+                        labels: occ.labels || [],
+                        datasets: [{
+                            label: 'Occupancy',
+                            data: occ.data || [],
+                            borderColor: '#8B5CF6',
+                            backgroundColor: 'rgba(139, 92, 246, 0.15)',
+                            borderWidth: 3,
+                            fill: true,
+                            tension: 0.4,
+                            pointBackgroundColor: '#8B5CF6',
+                            pointBorderColor: '#fff',
+                            pointBorderWidth: 2,
+                            pointRadius: 4
+                        }]
+                    },
+                    options: getChartOptions('Occupancy (selected period)', true)
+                });
+            }
+
             function getChartOptions(title, showGrid = false) {
                 return {
                     responsive: true,
@@ -1572,6 +1749,48 @@ def admin_dashboard():
                 if (!startTime.value) startTime.value = '00:00';
                 if (!endTime.value) endTime.value = '23:59';
             });
+
+            // Real-time occupancy: poll /api/occupancy every 5 seconds
+            function updateOccupancy() {
+                fetch('/api/occupancy')
+                    .then(function(r) { return r.ok ? r.json() : Promise.reject(r); })
+                    .then(function(data) {
+                        var el = document.getElementById('occupancy-count');
+                        if (el) el.textContent = data.current_occupancy;
+                    })
+                    .catch(function(err) { if (console && console.log) console.log('Occupancy fetch failed', err); });
+            }
+            setInterval(updateOccupancy, 5000);
+
+            document.addEventListener('click', function(e) {
+                var btn = e.target.closest('.notify-host-btn');
+                if (!btn || btn.disabled) return;
+                var vid = btn.getAttribute('data-visitor-id');
+                if (!vid) return;
+                btn.disabled = true;
+                btn.textContent = 'Sending...';
+                fetch('/api/notify_host_time_exceeded', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ visitor_id: vid }) })
+                    .then(function(r) { return r.json().then(function(d) { return r.ok ? d : Promise.reject(d); }); })
+                    .then(function(d) { btn.textContent = 'Sent'; if (d.message) alert(d.message); })
+                    .catch(function(d) { btn.disabled = false; btn.textContent = 'Notify host'; alert(d.message || 'Failed to send'); });
+            });
+
+            var dashboardRoomUtil = {{ (analytics.get('room_utilization_analytics') or [])|tojson }};
+            var dashboardOcc24 = {{ (analytics.get('occupancy_over_time_last24') or {'labels': [], 'data': []})|tojson }};
+            var dashboardOccPeriod = {{ (analytics.get('occupancy_over_time_period') or {'labels': [], 'data': []})|tojson }};
+            function exportRoomUtilizationCSV() {
+                var headers = ['Room', 'Visits'];
+                var rows = dashboardRoomUtil.map(function(r) { return [r.room_name || r.room_id, r.visit_count]; });
+                var csv = [headers.join(','), rows.map(function(r) { return r.map(function(c) { return '"' + String(c).replace(/"/g, '""') + '"'; }).join(','); }).join('\\n')].join('\\n');
+                var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv); a.download = 'room_utilization_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
+            }
+            function exportOccupancyCSV(which) {
+                var occ = which === 'last24' ? dashboardOcc24 : dashboardOccPeriod;
+                var headers = ['Time', 'Occupancy'];
+                var rows = (occ.labels || []).map(function(l, i) { return [l, (occ.data || [])[i] ?? 0]; });
+                var csv = [headers.join(','), rows.map(function(r) { return r.join(','); }).join('\\n')].join('\\n');
+                var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv); a.download = 'occupancy_' + which + '_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
+            }
         </script>
     </body>
     </html>
@@ -1634,6 +1853,9 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
     # Department distribution - initialize with actual departments from employees
     department_distribution = {}
     department_employee_map = {}  # Track department -> employee -> visit count
+    
+    # Room utilization - count visits per room (room_id from visitor or visit)
+    room_utilization = {}
     
     # Hourly distribution
     hourly_distribution = {'labels': [], 'data': []}
@@ -1711,7 +1933,9 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
                         exceeded_by = f"{exceeded_minutes}m"
                     
                     time_exceeded_visitors.append({
+                        'visitor_id': visitor_id,
                         'name': visitor_data.get('name', 'Unknown'),
+                        'employee_name': visitor_data.get('employee_name', ''),
                         'duration': visitor_data.get('duration', 'Unknown'),
                         'expected_duration': visitor_data.get('expected_duration', 'Unknown'),
                         'exceeded_by': exceeded_by
@@ -1758,12 +1982,14 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
         else:
             purpose_categories['Other'] += 1
         
-        # UPDATED: Department distribution - get actual department from employees table
+        # Department: prefer visit/visitor record, then employees table, never use person names
         employee_name = visitor_data.get('employee_name', '')
-        department = 'General'
+        department = visitor_data.get('department', '') or 'General'
+        if department == 'N/A':
+            department = 'General'
         employee_found = False
-        
-        if employee_name and employee_name != 'N/A':
+
+        if department == 'General' and employee_name and employee_name != 'N/A':
             # Look up department from employees table
             for emp_id, emp_data in all_employees.items():
                 emp_name = emp_data.get('name', '')
@@ -1771,8 +1997,7 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
                     department = emp_data.get('department', 'General')
                     employee_found = True
                     break
-            
-            # If exact match not found, try partial matching
+
             if not employee_found:
                 for emp_id, emp_data in all_employees.items():
                     emp_name = emp_data.get('name', '')
@@ -1780,26 +2005,31 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
                         department = emp_data.get('department', 'General')
                         employee_found = True
                         break
-            
-            # If still not found, use fallback logic
+
+            # Fallback: keep General; do not use employee name as department
             if not employee_found:
-                if 'HR' in employee_name.upper() or 'human' in employee_name.lower():
-                    department = 'HR'
-                elif 'IT' in employee_name.upper() or 'tech' in employee_name.lower():
-                    department = 'IT'
-                elif 'CSE' in employee_name.upper():
-                    department = 'CSE'
-                elif 'sales' in employee_name.lower():
-                    department = 'Sales'
-                elif 'manager' in employee_name.lower() or 'management' in employee_name.lower():
-                    department = 'Management'
-                elif 'operations' in employee_name.lower():
-                    department = 'Operations'
-                else:
-                    department = employee_name.split()[-1] if ' ' in employee_name else employee_name
+                department = 'General'
         
         if in_period:
             department_distribution[department] = department_distribution.get(department, 0) + 1
+            # Room utilization (root or from most recent visit)
+            room_id = visitor_data.get('room_id', '') or ''
+            if not room_id:
+                visits = visitor_data.get('visits', {})
+                if visits:
+                    sorted_visits = []
+                    for v_id, v_data in visits.items():
+                        ts = v_data.get('created_at') or v_data.get('check_in_time')
+                        if ts:
+                            try:
+                                sorted_visits.append((datetime.strptime(ts, '%Y-%m-%d %H:%M:%S'), v_data))
+                            except ValueError:
+                                pass
+                    if sorted_visits:
+                        sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                        room_id = sorted_visits[0][1].get('room_id', '') or ''
+            if room_id:
+                room_utilization[room_id] = room_utilization.get(room_id, 0) + 1
             
             # Track which employees received visitors
             if employee_found and employee_name:
@@ -1896,7 +2126,19 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
     # Sort departments by visitor count
     department_analytics.sort(key=lambda x: x['visitor_count'], reverse=True)
     
-    return {
+    # Room utilization analytics (name from meeting_rooms)
+    all_rooms = get_meeting_rooms()
+    room_utilization_analytics = []
+    for rid, count in room_utilization.items():
+        room_info = all_rooms.get(rid, {})
+        room_utilization_analytics.append({
+            'room_id': rid,
+            'room_name': room_info.get('name', rid),
+            'visit_count': count
+        })
+    room_utilization_analytics.sort(key=lambda x: x['visit_count'], reverse=True)
+    
+    result = {
         'total_visitors': total_visitors,
         'currently_checked_in': currently_checked_in,
         'blacklisted_count': blacklisted_count,
@@ -1915,8 +2157,167 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
         'recent_activities': recent_activities,
         'frequent_visitors': frequent_visitors,
         'time_exceeded_visitors': time_exceeded_visitors,
-        'filter_description': filter_description
+        'filter_description': filter_description,
+        'room_utilization_analytics': room_utilization_analytics
     }
+
+    # Occupancy over time: last 24 hours (rolling), one bucket per hour
+    occupancy_labels = []
+    occupancy_data = []
+    for k in range(24):
+        bucket_end = current_time - timedelta(hours=23 - k)
+        bucket_start = current_time - timedelta(hours=24 - k)
+        occupancy_labels.append(bucket_start.strftime('%H:%M'))
+        count = 0
+        for vid, vdata in all_visitors.items():
+            check_in_str = vdata.get('check_in_time', '')
+            visits = vdata.get('visits', {})
+            if not check_in_str or check_in_str == 'N/A':
+                if visits:
+                    sorted_visits = []
+                    for visit_id, visit_data in visits.items():
+                        ts = visit_data.get('created_at') or visit_data.get('check_in_time')
+                        if ts:
+                            try:
+                                sorted_visits.append((datetime.strptime(ts, '%Y-%m-%d %H:%M:%S'), visit_data))
+                            except ValueError:
+                                pass
+                    if sorted_visits:
+                        sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                        _, recent = sorted_visits[0]
+                        check_in_str = recent.get('check_in_time', '')
+                        check_out_str = recent.get('check_out_time', '')
+                    else:
+                        continue
+                else:
+                    continue
+            else:
+                check_out_str = vdata.get('check_out_time', '')
+            if not check_in_str or check_in_str == 'N/A':
+                continue
+            try:
+                check_in_dt = datetime.strptime(check_in_str, '%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                continue
+            if check_out_str and check_out_str != 'N/A':
+                try:
+                    check_out_dt = datetime.strptime(check_out_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    check_out_dt = current_time
+            else:
+                check_out_dt = current_time
+            if check_in_dt <= bucket_end and check_out_dt >= bucket_start:
+                count += 1
+        occupancy_data.append(count)
+    result['occupancy_over_time_last24'] = {'labels': occupancy_labels, 'data': occupancy_data}
+
+    # Occupancy over selected date/range (respects dashboard time filter)
+    period_occ_labels = []
+    period_occ_data = []
+    span_seconds = (end_datetime - start_datetime).total_seconds()
+    if span_seconds <= (24 * 3600 + 1):
+        # Single day or under 24h: hourly buckets
+        bucket_duration = timedelta(hours=1)
+        t = start_datetime
+        while t < end_datetime:
+            bucket_end = min(t + bucket_duration, end_datetime)
+            period_occ_labels.append(t.strftime('%H:%M'))
+            count = 0
+            for vid, vdata in all_visitors.items():
+                check_in_str = vdata.get('check_in_time', '')
+                visits = vdata.get('visits', {})
+                if not check_in_str or check_in_str == 'N/A':
+                    if visits:
+                        sorted_visits = []
+                        for visit_id, visit_data in visits.items():
+                            ts = visit_data.get('created_at') or visit_data.get('check_in_time')
+                            if ts:
+                                try:
+                                    sorted_visits.append((datetime.strptime(ts, '%Y-%m-%d %H:%M:%S'), visit_data))
+                                except ValueError:
+                                    pass
+                        if sorted_visits:
+                            sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                            _, recent = sorted_visits[0]
+                            check_in_str = recent.get('check_in_time', '')
+                            check_out_str = recent.get('check_out_time', '')
+                        else:
+                            continue
+                    else:
+                        continue
+                else:
+                    check_out_str = vdata.get('check_out_time', '')
+                if not check_in_str or check_in_str == 'N/A':
+                    continue
+                try:
+                    check_in_dt = datetime.strptime(check_in_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue
+                if check_out_str and check_out_str != 'N/A':
+                    try:
+                        check_out_dt = datetime.strptime(check_out_str, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        check_out_dt = current_time
+                else:
+                    check_out_dt = current_time
+                if check_in_dt <= bucket_end and check_out_dt >= t:
+                    count += 1
+            period_occ_data.append(count)
+            t = bucket_end
+    else:
+        # Multi-day: one bucket per day
+        day = start_datetime.date()
+        end_day = end_datetime.date()
+        while day <= end_day:
+            day_start = datetime.combine(day, start_datetime.time()) if day == start_datetime.date() else datetime.combine(day, datetime.min.time())
+            day_end = datetime.combine(day, end_datetime.time()) if day == end_datetime.date() else datetime.combine(day, datetime.max.time().replace(microsecond=999999))
+            day_start = max(day_start, start_datetime)
+            day_end = min(day_end, end_datetime)
+            period_occ_labels.append(day.strftime('%Y-%m-%d'))
+            count = 0
+            for vid, vdata in all_visitors.items():
+                check_in_str = vdata.get('check_in_time', '')
+                visits = vdata.get('visits', {})
+                if not check_in_str or check_in_str == 'N/A':
+                    if visits:
+                        sorted_visits = []
+                        for visit_id, visit_data in visits.items():
+                            ts = visit_data.get('created_at') or visit_data.get('check_in_time')
+                            if ts:
+                                try:
+                                    sorted_visits.append((datetime.strptime(ts, '%Y-%m-%d %H:%M:%S'), visit_data))
+                                except ValueError:
+                                    pass
+                        if sorted_visits:
+                            sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                            _, recent = sorted_visits[0]
+                            check_in_str = recent.get('check_in_time', '')
+                            check_out_str = recent.get('check_out_time', '')
+                        else:
+                            continue
+                    else:
+                        continue
+                else:
+                    check_out_str = vdata.get('check_out_time', '')
+                if not check_in_str or check_in_str == 'N/A':
+                    continue
+                try:
+                    check_in_dt = datetime.strptime(check_in_str, '%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    continue
+                if check_out_str and check_out_str != 'N/A':
+                    try:
+                        check_out_dt = datetime.strptime(check_out_str, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        check_out_dt = current_time
+                else:
+                    check_out_dt = current_time
+                if check_in_dt <= day_end and check_out_dt >= day_start:
+                    count += 1
+            period_occ_data.append(count)
+            day += timedelta(days=1)
+    result['occupancy_over_time_period'] = {'labels': period_occ_labels, 'data': period_occ_data}
+    return result
 
 def calculate_date_range(time_filter, start_date, end_date, start_time='00:00', end_time='23:59'):
     """Calculate date range based on filter with time support"""
@@ -3209,7 +3610,7 @@ def visitors_list():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Visitor Management | Admin Dashboard</title>
+        <title>Workplace Intelligence | Admin Dashboard</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
@@ -3397,7 +3798,7 @@ def visitors_list():
             <!-- Header -->
             <div class="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
                 <div>
-                    <h1 class="text-3xl font-bold text-gray-900">Visitor Management</h1>
+                    <h1 class="text-3xl font-bold text-gray-900">Workplace Intelligence</h1>
                     <p class="text-gray-600">Manage and track all visitor activities</p>
                 </div>
                 <div class="flex flex-wrap gap-3">
@@ -4087,9 +4488,64 @@ def toggle_blacklist(visitor_id):
             'message': f'Error updating blacklist status: {str(e)}'
         }), 500
 
-# Load your trained sentiment model once
-with open("sentiment_analysis.pkl", "rb") as f:
-    sentiment_model = pickle.load(f)
+
+@app.route('/api/occupancy', methods=['GET'])
+def api_occupancy():
+    """Return current building occupancy (visitors with status Checked-In, not time-exceeded)."""
+    try:
+        if USE_MOCK_DATA:
+            all_visitors = get_mock_visitors()
+        else:
+            visitors_ref = db.reference('visitors')
+            all_visitors = visitors_ref.get() or {}
+
+        current_time = datetime.now()
+        current_occupancy = 0
+
+        for visitor_id, visitor_data in all_visitors.items():
+            status = visitor_data.get('status', 'Registered')
+            if status != 'Checked-In':
+                continue
+            expected_checkout_str = visitor_data.get('expected_checkout_time', '')
+            if expected_checkout_str and expected_checkout_str != 'N/A':
+                try:
+                    expected_checkout = datetime.strptime(
+                        expected_checkout_str, '%Y-%m-%d %H:%M:%S'
+                    )
+                    if current_time > expected_checkout:
+                        continue  # time exceeded, do not count
+                except ValueError:
+                    pass
+            current_occupancy += 1
+
+        return jsonify({
+            'current_occupancy': current_occupancy,
+            'timestamp': current_time.isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/occupancy_over_time', methods=['GET'])
+def api_occupancy_over_time():
+    """Return occupancy over the last 24 hours (24 one-hour buckets)."""
+    try:
+        analytics = get_visitor_analytics()
+        occ = analytics.get('occupancy_over_time_last24', {'labels': [], 'data': []})
+        return jsonify({
+            'occupancy_over_time_last24': occ,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# Load your trained sentiment model once (optional; may already be set above)
+try:
+    with open("sentiment_analysis.pkl", "rb") as f:
+        sentiment_model = pickle.load(f)
+except (FileNotFoundError, Exception):
+    pass  # sentiment_model already set earlier or unavailable
 from flask import Flask, render_template_string, request, abort # Import abort for 404
 from datetime import datetime, timedelta
 # Assuming db and db.reference are properly imported
@@ -4981,6 +5437,249 @@ def visitor_registration():
     })
     db.reference(f'invitations/{token}').update({'status': 'Completed'})
     return f"Registration complete for {name}"
+
+# --------------------------
+# Meeting Rooms Routes
+# --------------------------
+@app.route('/rooms')
+def rooms_list():
+    """List meeting rooms with add/edit/delete."""
+    rooms = get_meeting_rooms()
+    # Normalize to list of (id, data) for template
+    rooms_list_data = [{'id': rid, **data} for rid, data in rooms.items()]
+    ROOMS_HTML = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Meeting Rooms - Admin</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    </head>
+    <body class="bg-gray-50 min-h-screen">
+        <div class="max-w-5xl mx-auto p-6">
+            <div class="flex justify-between items-center mb-6">
+                <div>
+                    <a href="/" class="text-blue-600 hover:underline text-sm mb-2 inline-block"><i class="fas fa-arrow-left mr-1"></i>Back to Admin</a>
+                    <h1 class="text-2xl font-bold text-gray-900">Meeting Rooms</h1>
+                    <p class="text-gray-500 text-sm">Add, edit, or remove rooms. Capacity and amenities are used for suggestions and analytics.</p>
+                </div>
+                <button onclick="openAddModal()" class="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg flex items-center">
+                    <i class="fas fa-plus mr-2"></i>Add Room
+                </button>
+            </div>
+            <div class="bg-white rounded-xl shadow overflow-hidden">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Capacity</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Floor</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amenities</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="roomsTableBody" class="divide-y divide-gray-200">
+                        {% for r in rooms_list_data %}
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-6 py-4 text-sm font-medium text-gray-900">{{ r.name }}</td>
+                            <td class="px-6 py-4 text-sm text-gray-600">{{ r.capacity }}</td>
+                            <td class="px-6 py-4 text-sm text-gray-600">{{ r.floor }}</td>
+                            <td class="px-6 py-4 text-sm text-gray-500">{{ r.amenities or '-' }}</td>
+                            <td class="px-6 py-4 text-right">
+                                <button type="button" class="text-blue-600 hover:underline mr-3" data-action="edit" data-id="{{ r.id }}" data-name="{{ r.name|e }}" data-capacity="{{ r.capacity }}" data-floor="{{ (r.floor or '')|e }}" data-amenities="{{ (r.amenities or '')|e }}">Edit</button>
+                                <button type="button" class="text-red-600 hover:underline" data-action="delete" data-id="{{ r.id }}" data-name="{{ r.name|e }}">Delete</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% if not rooms_list_data %}
+                <p class="p-6 text-gray-500 text-center">No rooms yet. Click "Add Room" to create one.</p>
+                {% endif %}
+            </div>
+        </div>
+        <!-- Add/Edit Modal -->
+        <div id="roomModal" class="fixed inset-0 bg-black/50 items-center justify-center z-50" style="display: none;">
+            <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6">
+                <h2 id="modalTitle" class="text-lg font-semibold mb-4">Add Room</h2>
+                <form id="roomForm" onsubmit="submitRoom(event)">
+                    <input type="hidden" id="roomId" name="room_id">
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                            <input type="text" id="roomName" name="name" required class="w-full border rounded-lg px-3 py-2" placeholder="e.g. Conference A">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Capacity</label>
+                            <input type="number" id="roomCapacity" name="capacity" min="1" class="w-full border rounded-lg px-3 py-2" placeholder="10">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Floor</label>
+                            <input type="text" id="roomFloor" name="floor" class="w-full border rounded-lg px-3 py-2" placeholder="1">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-1">Amenities</label>
+                            <input type="text" id="roomAmenities" name="amenities" class="w-full border rounded-lg px-3 py-2" placeholder="Projector, Whiteboard">
+                        </div>
+                    </div>
+                    <div class="flex justify-end gap-2 mt-6">
+                        <button type="button" onclick="closeModal()" class="px-4 py-2 border rounded-lg hover:bg-gray-50">Cancel</button>
+                        <button type="submit" class="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700">Save</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+        <script>
+            function openAddModal() {
+                document.getElementById('modalTitle').textContent = 'Add Room';
+                document.getElementById('roomId').value = '';
+                document.getElementById('roomName').value = '';
+                document.getElementById('roomCapacity').value = '';
+                document.getElementById('roomFloor').value = '';
+                document.getElementById('roomAmenities').value = '';
+                document.getElementById('roomModal').style.display = 'flex';
+            }
+            function openEditModal(id, name, capacity, floor, amenities) {
+                document.getElementById('modalTitle').textContent = 'Edit Room';
+                document.getElementById('roomId').value = id || '';
+                document.getElementById('roomName').value = name || '';
+                document.getElementById('roomCapacity').value = capacity !== undefined && capacity !== '' ? capacity : '';
+                document.getElementById('roomFloor').value = floor || '';
+                document.getElementById('roomAmenities').value = amenities || '';
+                document.getElementById('roomModal').style.display = 'flex';
+            }
+            function closeModal() {
+                document.getElementById('roomModal').style.display = 'none';
+            }
+            function submitRoom(e) {
+                e.preventDefault();
+                var id = document.getElementById('roomId').value;
+                var data = {
+                    name: document.getElementById('roomName').value,
+                    capacity: document.getElementById('roomCapacity').value,
+                    floor: document.getElementById('roomFloor').value,
+                    amenities: document.getElementById('roomAmenities').value
+                };
+                var url = id ? '/api/rooms/' + encodeURIComponent(id) : '/api/rooms';
+                var method = id ? 'PUT' : 'POST';
+                fetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+                    .then(function(r) { return r.json().then(function(d) { return r.ok ? d : Promise.reject(d); }); })
+                    .then(function() { window.location.reload(); })
+                    .catch(function(err) { alert(err.message || 'Failed to save'); });
+            }
+            function deleteRoom(id, name) {
+                if (!confirm('Delete room "' + (name || id) + '"?')) return;
+                fetch('/api/rooms/' + encodeURIComponent(id), { method: 'DELETE' })
+                    .then(function(r) { return r.ok ? Promise.resolve() : r.json().then(function(d) { return Promise.reject(d); }); })
+                    .then(function() { window.location.reload(); })
+                    .catch(function() { alert('Failed to delete'); });
+            }
+            document.addEventListener('DOMContentLoaded', function() {
+                document.getElementById('roomsTableBody').addEventListener('click', function(ev) {
+                    var btn = ev.target.closest('button[data-action]');
+                    if (!btn) return;
+                    if (btn.getAttribute('data-action') === 'edit') {
+                        openEditModal(btn.getAttribute('data-id'), btn.getAttribute('data-name'), btn.getAttribute('data-capacity'), btn.getAttribute('data-floor') || '', btn.getAttribute('data-amenities') || '');
+                    } else if (btn.getAttribute('data-action') === 'delete') {
+                        deleteRoom(btn.getAttribute('data-id'), btn.getAttribute('data-name'));
+                    }
+                });
+            });
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(ROOMS_HTML, rooms_list_data=rooms_list_data)
+
+@app.route('/api/rooms', methods=['POST'])
+def api_rooms_create():
+    """Create a new meeting room. JSON: name, capacity, floor, amenities."""
+    try:
+        data = request.get_json() or {}
+        room_id = 'room_' + str(uuid.uuid4())[:8]
+        save_meeting_room(room_id, data)
+        return jsonify({'success': True, 'room_id': room_id})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+@app.route('/api/rooms/<room_id>', methods=['PUT'])
+def api_rooms_update(room_id):
+    """Update a meeting room. JSON: name, capacity, floor, amenities."""
+    try:
+        data = request.get_json() or {}
+        save_meeting_room(room_id, data)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+@app.route('/api/rooms/<room_id>', methods=['DELETE'])
+def api_rooms_delete(room_id):
+    """Delete a meeting room."""
+    try:
+        delete_meeting_room(room_id)
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 400
+
+@app.route('/api/rooms/list')
+def api_rooms_list():
+    """Return all meeting rooms (for Register_App or other consumers)."""
+    rooms = get_meeting_rooms()
+    return jsonify(dict(rooms))
+
+@app.route('/api/notify_host_time_exceeded', methods=['POST'])
+def api_notify_host_time_exceeded():
+    """Send a notification email to the host (employee) for a time-exceeded visitor."""
+    try:
+        data = request.get_json() or {}
+        visitor_id = data.get('visitor_id')
+        if not visitor_id:
+            return jsonify({'success': False, 'message': 'visitor_id required'}), 400
+        if USE_MOCK_DATA:
+            all_visitors = get_mock_visitors()
+            all_employees = get_mock_employees()
+        else:
+            all_visitors = (db.reference('visitors').get() or {})
+            all_employees = (db.reference('employees').get() or {})
+        visitor_data = all_visitors.get(visitor_id)
+        if not visitor_data:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        employee_name = (visitor_data.get('employee_name') or '').strip()
+        if not employee_name:
+            return jsonify({'success': False, 'message': 'No host (employee) assigned to this visit'}), 400
+        host_email = None
+        for eid, emp in all_employees.items():
+            if (emp.get('name') or '').strip().lower() == employee_name.lower():
+                host_email = (emp.get('email') or '').strip()
+                break
+        if not host_email:
+            return jsonify({'success': False, 'message': f'Host "{employee_name}" has no email on file'}), 400
+        visitor_name = visitor_data.get('name', 'Unknown')
+        subject = "Time exceeded: visitor still on premises"
+        body = f"Hello,\n\nVisitor \"{visitor_name}\" has exceeded their expected stay and is still on premises.\n\nPlease follow up as needed.\n\n— Workplace Intelligence Admin"
+        if send_notification_email(host_email, subject, body):
+            return jsonify({'success': True, 'message': f'Notification sent to {host_email}'})
+        return jsonify({'success': False, 'message': 'Email could not be sent (check SMTP config)'}), 500
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+@app.route('/api/rooms/suggest')
+def api_rooms_suggest():
+    """Suggest rooms by capacity: rooms with capacity >= count, sorted by capacity (best fit), top N."""
+    try:
+        count = request.args.get('count', type=int, default=5)
+        if count is None or count < 1:
+            count = 5
+        top = min(request.args.get('top', type=int, default=3) or 3, 10)
+        rooms = get_meeting_rooms()
+        suitable = [(rid, r) for rid, r in rooms.items() if (r.get('capacity') or 0) >= count]
+        suitable.sort(key=lambda x: x[1].get('capacity', 0))
+        result = [{'room_id': rid, 'name': r.get('name', rid), 'capacity': r.get('capacity'), 'floor': r.get('floor'), 'amenities': r.get('amenities', '')} for rid, r in suitable[:top]]
+        return jsonify({'suggestions': result})
+    except Exception as e:
+        return jsonify({'suggestions': [], 'error': str(e)})
 
 # --------------------------
 # Employee Management Routes
