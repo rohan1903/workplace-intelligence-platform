@@ -56,7 +56,7 @@ These items address known limitations. Implementable ones are listed as features
 | # | Item | Type | Priority | Notes |
 |---|------|------|----------|--------|
 | G1 | **Liveness / anti-spoofing** | Feature | Should have | Optional layer (e.g. blink/smile or passive liveness) to mitigate photo/video attacks. |
-| G2 | **Tailgating detection or alerting** | Feature | Nice to have | Capacity/sensor at gate or “N entered, 1 scanned” alert; no automatic mitigation today. |
+| G2 | **Tailgating detection or alerting** | Feature | Nice to have | Capacity/sensor at gate or "N entered, 1 scanned" alert; no automatic mitigation today. |
 | G3 | **Face capture quality checks** | Feature | Nice to have | Reject blur/poor lighting at registration; document recommended conditions. |
 | G4 | **Time exceeded actions** | Feature | Should have | Notify host, revoke access for visit, or mark status; today only visibility on dashboard. |
 
@@ -64,9 +64,9 @@ These items address known limitations. Implementable ones are listed as features
 
 | # | Item | Type | Priority | Notes |
 |---|------|------|----------|--------|
-| G5 | **Employee presence (occupancy)** | Feature | Nice to have | Optional WiFi/badge feed so “occupancy” can include employees; today visitors only. |
+| G5 | **Employee presence (occupancy)** | Feature | Nice to have | Optional WiFi/badge feed so "occupancy" can include employees; today visitors only. |
 | G6 | **Multi-gate occupancy** | Feature | Should have | gate_id on events, aggregate by building; tested single-gate only today. |
-| G7 | **Simple room booking** | Feature | Should have | Time slots + link to visit; README says “suggestions only,” no booking yet. |
+| G7 | **Simple room booking** | Feature | Should have | Time slots + link to visit; README says "suggestions only," no booking yet. |
 | G8 | **Database abstraction** | Feature | Nice to have | Repository layer + second backend (e.g. Postgres) to reduce Firebase lock-in. |
 
 ### Product & ops
@@ -75,7 +75,7 @@ These items address known limitations. Implementable ones are listed as features
 |---|------|------|----------|--------|
 | G9 | **Mobile / PWA** | Feature | Nice to have | Responsive web today; optional PWA or thin native app. |
 | G10 | **Per-gate auth policy** | Feature | Nice to have | Different auth mode per gate (e.g. hybrid at main, QR-only at delivery). |
-| G11 | **Production & liability disclaimer** | Documentation | Must have | README: production checklist, “no warranty / use at your own risk.” |
+| G11 | **Production & liability disclaimer** | Documentation | Must have | README: production checklist, "no warranty / use at your own risk." |
 | G12 | **Load / scale testing** | Feature | Nice to have | Document limits; basic load tests for registration, check-in, dashboard. |
 
 ---
