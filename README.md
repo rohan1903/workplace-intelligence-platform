@@ -205,7 +205,9 @@ SMTP_PORT=587
 EMAIL_USER=<email>
 EMAIL_PASS=<app_password>
 GEMINI_API_KEY=<key>
+ADMIN_APP_URL=http://localhost:5000
 ```
+(ADMIN_APP_URL is used to fetch meeting rooms for the registration dropdown.)
 
 **Admin/.env:**
 ```
@@ -290,6 +292,13 @@ Place `firebase_credentials.json` in each component directory before starting.
 - Firebase dependency (could support other databases in future).
 - No mobile app (web-based interface only).
 
+## Production use and disclaimer
+
+This project is provided for **academic and research purposes**. If you use it in production or for access control:
+
+- **Production checklist:** Use HTTPS, replace all default `SECRET_KEY` values, restrict Firebase credentials, and run behind a proper WSGI server (e.g. Gunicorn). See Security Notes below.
+- **No warranty:** The software is provided “as is” without warranty of any kind. Use at your own risk. The maintainers are not liable for any loss or damage arising from its use.
+
 ## Security Notes
 
 - Replace default `SECRET_KEY` values before any non-local deployment.
@@ -334,13 +343,3 @@ Place `firebase_credentials.json` in each component directory before starting.
 ## License
 
 This project is provided for academic and research purposes.
-
-## Citation
-
-If you use this work in your research, please cite:
-
-```
-Hybrid Face-QR Authentication Protocol with Workspace Intelligence: 
-An Open-Source Visitor Management System
-[Your Name], [Your Institution], [Year]
-```
