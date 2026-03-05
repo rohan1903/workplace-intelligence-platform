@@ -1,6 +1,6 @@
-# Complete Testing Guide for Visitor Management System
+# Complete Testing Guide for Office Workplace Intelligence Platform
 
-This guide will help you set up and test the entire visitor management system step by step.
+This guide will help you set up and test the entire platform step by step.
 
 ---
 

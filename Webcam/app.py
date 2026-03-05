@@ -338,7 +338,7 @@ def send_feedback_email(visitor_email, visitor_name, feedback_link):
                 </div>
 
                 <p style="font-size: 13px; color: #777; text-align: center;">
-                    This feedback will help us enhance our visitor management system and services.
+                    This feedback will help us enhance our workplace intelligence platform and services.
                 </p>
                 
                 <p style="font-size: 13px; color: #777; text-align: center;">

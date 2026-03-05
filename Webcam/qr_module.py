@@ -1,5 +1,5 @@
 """
-QR Code Module for Visitor Management System
+QR Code Module for Office Workplace Intelligence Platform
 =============================================
 Handles QR generation, validation, state management, twin detection,
 and security alerts for the dual-authentication (QR + Face) gate system.

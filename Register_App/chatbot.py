@@ -12,14 +12,14 @@ GOOGLE_API_KEY = "AIzaSyBzf7V1q3f5g_5czJDPqNiD7LpENyj6FEc"
 genai.configure(api_key=GOOGLE_API_KEY)
 
 # System Name
-SYSTEM_NAME = "Visitor Management System (VMS)"
+SYSTEM_NAME = "Office Workplace Intelligence Platform"
 
 # Verified and Structured Knowledge Base (The core of the bot's "training")
 # **This is the section you modify to "train" the bot with new facts and locations.**
 SYSTEM_DATA = f"""
 The bot is the {SYSTEM_NAME} Assistant, designed to help visitors navigate the premises and manage their visits efficiently.
 
-VISITOR MANAGEMENT FEATURES:
+WORKPLACE INTELLIGENCE FEATURES:
 
 REGISTRATION & CHECK-IN:
 - New visitors can register at the registration kiosk or through the web portal.
@@ -78,7 +78,7 @@ if "chat" not in st.session_state:
     st.session_state.chat = model.start_chat(history=[
         {"role": "user", "parts": [{"text": SYSTEM_PROMPT}]},
         # Internal model response to the system prompt
-        {"role": "model", "parts": [{"text": "Understood. Ready to assist visitors with the Visitor Management System."}]} 
+        {"role": "model", "parts": [{"text": "Understood. Ready to assist visitors with the Office Workplace Intelligence Platform."}]} 
     ])
     
     # Initial message for display in the chat history
@@ -94,7 +94,7 @@ if "messages" not in st.session_state:
 # --- Page Header ---
 st.markdown(
     f"""
-    <h1 style="text-align: center; color: #4361ee;">Visitor Management System Assistant 🏢</h1>
+    <h1 style="text-align: center; color: #4361ee;">Workplace Intelligence Assistant 🏢</h1>
     <p style="text-align: center; font-size: 18px;">Your personal guide to visitor registration, check-in, and premises navigation.</p>
     <hr style="border-color: #4361ee;">
     """,

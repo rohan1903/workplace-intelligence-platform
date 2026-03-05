@@ -91,7 +91,7 @@ def respond_by_intent(intent, message):
     elif intent == "complaints":
         return handle_issue_logging(message)
     elif intent == "company_info":
-        return "📢 Welcome to our Visitor Management System. Contact the admin desk for more information."
+        return "📢 Welcome to our Office Workplace Intelligence Platform. Contact the admin desk for more information."
     elif intent == "feedback":
         return handle_feedback(message)
     elif intent == "headquarters":
