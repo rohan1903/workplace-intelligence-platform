@@ -525,7 +525,7 @@
             backdrop-filter: blur(4px);
         }
         .photo-placeholder {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
         }
         .detail-card {
             border-left: 4px solid;
@@ -536,7 +536,7 @@
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen py-8 px-4">
+<body class="bg-gradient-to-br from-blue-50 to-slate-100 min-h-screen py-8 px-4">
     <div class="max-w-2xl mx-auto">
         <!-- Header -->
         <div class="text-center mb-8">
@@ -583,8 +583,8 @@
                         <span class="text-lg font-mono text-gray-800">{{ visitor_id }}</span>
                     </div>
                     
-                    <div class="detail-card bg-purple-50 border-l-purple-500 p-4 rounded-lg">
-                        <label class="block text-sm font-semibold text-purple-700 mb-1">Visit ID</label>
+                    <div class="detail-card bg-slate-50 border-l-slate-500 p-4 rounded-lg">
+                        <label class="block text-sm font-semibold text-slate-700 mb-1">Visit ID</label>
                         <span class="text-lg font-mono text-gray-800">{{ latest_visit_id }}</span>
                     </div>
                     
@@ -598,8 +598,8 @@
                         <span class="status-badge status-{{ status.lower() }}">{{ status }}</span>
                     </div>
                     
-                    <div class="detail-card bg-indigo-50 border-l-indigo-500 p-4 rounded-lg md:col-span-2">
-                        <label class="block text-sm font-semibold text-indigo-700 mb-1">Visit Date</label>
+                    <div class="detail-card bg-blue-50 border-l-blue-500 p-4 rounded-lg md:col-span-2">
+                        <label class="block text-sm font-semibold text-blue-700 mb-1">Visit Date</label>
                         <span class="text-lg text-gray-800">{{ visit_date }}</span>
                     </div>
                 </div>

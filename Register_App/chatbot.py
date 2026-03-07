@@ -94,9 +94,9 @@ if "messages" not in st.session_state:
 # --- Page Header ---
 st.markdown(
     f"""
-    <h1 style="text-align: center; color: #4361ee;">Workplace Intelligence Assistant 🏢</h1>
+    <h1 style="text-align: center; color: #2563eb;">Workplace Intelligence Assistant 🏢</h1>
     <p style="text-align: center; font-size: 18px;">Your personal guide to visitor registration, check-in, and premises navigation.</p>
-    <hr style="border-color: #4361ee;">
+    <hr style="border-color: #2563eb;">
     """,
     unsafe_allow_html=True,
 )

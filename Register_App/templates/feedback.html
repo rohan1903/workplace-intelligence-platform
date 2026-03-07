@@ -10,8 +10,8 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
         :root {
-            --primary-purple: #6a0dad;
-            --primary-purple-dark: #5a0ca0;
+            --primary-blue: #2563eb;
+            --primary-blue-dark: #1d4ed8;
             --secondary-red: #d9534f;
             --secondary-red-dark: #c9302c;
             --tertiary-orange: #f0ad4e;
@@ -67,7 +67,7 @@
         }
 
         h1 {
-            color: var(--primary-purple);
+            color: var(--primary-blue);
             margin-bottom: 10px;
             font-size: 2.5em;
             font-weight: 700;
@@ -100,12 +100,12 @@
         }
 
         .language-selector-container select:hover {
-            border-color: var(--primary-purple);
+            border-color: var(--primary-blue);
         }
 
         .language-selector-container select:focus {
-            border-color: var(--primary-purple);
-            box-shadow: 0 0 0 3px rgba(106, 13, 173, 0.2);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
         }
 
 
@@ -130,13 +130,13 @@
 
         .transcription-area:focus {
             outline: none;
-            border-color: var(--primary-purple);
-            box-shadow: 0 0 0 3px rgba(106, 13, 173, 0.2);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
         }
 
         .transcription-area.recording {
-            border-color: var(--primary-purple);
-            box-shadow: 0 0 12px rgba(106, 13, 173, 0.4);
+            border-color: var(--primary-blue);
+            box-shadow: 0 0 12px rgba(37, 99, 235, 0.4);
         }
 
         .transcription-area:empty::before {
@@ -157,12 +157,12 @@
         }
 
         .transcription-area::-webkit-scrollbar-thumb {
-            background: var(--primary-purple);
+            background: var(--primary-blue);
             border-radius: 10px;
         }
 
         .transcription-area::-webkit-scrollbar-thumb:hover {
-            background: var(--primary-purple-dark);
+            background: var(--primary-blue-dark);
         }
 
         .audio-visualizer {
@@ -199,7 +199,7 @@
         }
 
         .audio-visualizer.active .bar {
-            background-color: var(--primary-purple); /* Purple when active */
+            background-color: var(--primary-blue); /* Blue when active */
             animation: waveform 1.2s ease-in-out infinite alternate;
         }
 
@@ -249,7 +249,7 @@
             justify-content: center;
             outline: none;
             box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
-            background-image: linear-gradient(45deg, var(--primary-purple), var(--primary-purple-dark));
+            background-image: linear-gradient(45deg, var(--primary-blue), var(--primary-blue-dark));
             color: var(--white);
         }
 
@@ -260,12 +260,12 @@
 
         /* Specific button styles with gradients */
         #startButton {
-            background-image: linear-gradient(45deg, #8e2de2, #4a00e0); /* Deeper purple */
+            background-image: linear-gradient(45deg, #2563eb, #1d4ed8); /* Blue gradient */
         }
         #startButton:hover:not(:disabled) {
-            background-image: linear-gradient(45deg, #9b3de9, #5a10e9);
+            background-image: linear-gradient(45deg, #3b82f6, #2563eb);
             transform: translateY(-3px);
-            box-shadow: 0 6px 15px rgba(74, 0, 224, 0.4);
+            box-shadow: 0 6px 15px rgba(37, 99, 235, 0.4);
         }
         #startButton.recording-active i {
             animation: pulse 1.5s infinite; /* Pulsing microphone icon */
@@ -345,7 +345,7 @@
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            background-color: var(--primary-purple);
+            background-color: var(--primary-blue);
             color: var(--white);
             padding: 20px 30px;
             border-radius: 10px;
@@ -369,8 +369,8 @@
         .categorization-result, .translation-result, .dynamic-response {
             margin-top: 20px;
             padding: 15px;
-            background-color: #e6e6fa; /* Light purple background */
-            border: 1px solid var(--primary-purple);
+            background-color: #eff6ff; /* Light blue background */
+            border: 1px solid var(--primary-blue);
             border-radius: 10px;
             text-align: left;
             font-size: 1em;
@@ -388,7 +388,7 @@
         }
 
         .categorization-result strong, .translation-result strong, .dynamic-response strong {
-            color: var(--primary-purple-dark);
+            color: var(--primary-blue-dark);
         }
 
         .loading-spinner {
@@ -397,7 +397,7 @@
             height: 20px;
             border: 3px solid rgba(255, 255, 255, .3);
             border-radius: 50%;
-            border-top-color: var(--primary-purple);
+            border-top-color: var(--primary-blue);
             animation: spin 1s ease-in-out infinite;
             -webkit-animation: spin 1s ease-in-out infinite;
             margin-left: 10px;
@@ -423,7 +423,7 @@
             bottom: 30px;
             left: 50%;
             transform: translateX(-50%);
-            background-color: var(--primary-purple);
+            background-color: var(--primary-blue);
             color: white;
             padding: 15px 25px;
             border-radius: 30px;

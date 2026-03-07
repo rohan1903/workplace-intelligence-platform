@@ -3,7 +3,7 @@ import uuid
 import smtplib
 import random
 from email.mime.text import MIMEText
-from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, jsonify
+from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
 try:
@@ -12,10 +12,13 @@ try:
     FIREBASE_AVAILABLE = True
 except ImportError:
     FIREBASE_AVAILABLE = False
-    print("⚠️  firebase-admin not installed. Using mock data mode.")
+    print("[!] firebase-admin not installed. Using mock data mode.")
 import pickle
 from datetime import datetime, timedelta
 from collections import Counter, defaultdict
+import csv
+import io
+import json
 
 import pickle
 import numpy as np
@@ -60,21 +63,21 @@ if FIREBASE_AVAILABLE and not USE_MOCK_DATA:
             firebase_admin.initialize_app(cred, {
                 'databaseURL': 'https://v-guard-af8af-default-rtdb.firebaseio.com/'
             })
-            print("✅ Firebase initialized successfully - Using REAL data")
+            print("[OK] Firebase initialized successfully - Using REAL data")
         else:
             USE_MOCK_DATA = True
-            print("⚠️  Firebase credentials not found. Using mock data for demonstration.")
-            print("💡 To use real Firebase: Add firebase_credentials.json and set USE_MOCK_DATA=False")
+            print("[!] Firebase credentials not found. Using mock data for demonstration.")
+            print("[*] To use real Firebase: Add firebase_credentials.json and set USE_MOCK_DATA=False")
     except Exception as e:
         USE_MOCK_DATA = True
-        print(f"⚠️  Firebase initialization failed: {e}. Using mock data for demonstration.")
+        print(f"[!] Firebase initialization failed: {e}. Using mock data for demonstration.")
 elif USE_MOCK_DATA:
-    print("💡 Using MOCK DATA for demonstration")
-    print("💡 To switch to real Firebase: Set environment variable USE_MOCK_DATA=False")
+    print("[*] Using MOCK DATA for demonstration")
+    print("[*] To switch to real Firebase: Set environment variable USE_MOCK_DATA=False")
     print("   Example: export USE_MOCK_DATA=False")
 else:
     USE_MOCK_DATA = True
-    print("⚠️  Firebase not available. Using mock data for demonstration.")
+    print("[!] Firebase not available. Using mock data for demonstration.")
 
 # --------------------------
 # Email Config
@@ -87,7 +90,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 def send_email(recipient_email, registration_link):
     """Send email with registration link."""
     if not (SENDER_EMAIL and SENDER_PASS):
-        print("⚠️ Missing SMTP credentials.")
+        print("[!] Missing SMTP credentials.")
         return False
 
     msg = MIMEText(f"Hello,\n\nPlease register here: {registration_link}\n\nRegards,\nAdmin Team")
@@ -100,10 +103,10 @@ def send_email(recipient_email, registration_link):
             server.starttls()
             server.login(SENDER_EMAIL, SENDER_PASS)
             server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
-        print(f"✅ Email sent to {recipient_email}")
+        print(f"[OK] Email sent to {recipient_email}")
         return True
     except Exception as e:
-        print(f"❌ Email sending failed: {e}")
+        print(f"[X] Email sending failed: {e}")
         return False
 
 def send_notification_email(recipient_email, subject, body):
@@ -140,8 +143,12 @@ def trigger_invitation(email):
 # --------------------------
 # Mock Data Functions (for demonstration without Firebase)
 # --------------------------
+# In-memory blacklist overlay for mock mode so add/remove persists across page loads
+_MOCK_BLACKLIST_STATE = {}
+
 def get_mock_visitors():
     """Generate diverse mock visitor data covering normal and edge cases for analytics and occupancy."""
+    random.seed(42)  # Deterministic mock data so blacklist overlay and counts are stable across requests
     mock_visitors = {}
     base = datetime.now()
 
@@ -318,6 +325,15 @@ def get_mock_visitors():
         if check_in is None:
             mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
 
+    # Apply persisted blacklist state (so mock add/remove works across reloads)
+    for vid, state in _MOCK_BLACKLIST_STATE.items():
+        if vid not in mock_visitors:
+            continue
+        bi = mock_visitors[vid].setdefault('basic_info', {})
+        bi['blacklisted'] = 'yes' if state.get('blacklisted') else 'no'
+        bi['blacklist_reason'] = state.get('reason', 'No reason provided')
+        bi['blacklisted_at'] = state.get('blacklisted_at', '')
+        mock_visitors[vid]['blacklisted'] = state.get('blacklisted', False)
     return mock_visitors
 
 def get_mock_employees():
@@ -425,6 +441,38 @@ def delete_meeting_room(room_id):
         _mock_rooms_cache.pop(room_id, None)
         return
     db.reference(f'meeting_rooms/{room_id}').delete()
+
+
+def _get_occupied_room_ids():
+    """Return set of room_id that have at least one visitor currently checked in."""
+    if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+    else:
+        visitors_ref = db.reference('visitors')
+        all_visitors = visitors_ref.get() or {}
+    occupied = set()
+    for vid, vdata in all_visitors.items():
+        if (vdata.get('status') or '').strip() != 'Checked-In':
+            continue
+        room_id = (vdata.get('room_id') or '').strip()
+        if not room_id:
+            visits = vdata.get('visits', {})
+            if visits:
+                sorted_visits = []
+                for v_id, v_data in visits.items():
+                    ts = v_data.get('created_at') or v_data.get('check_in_time')
+                    if ts:
+                        try:
+                            sorted_visits.append((datetime.strptime(ts, '%Y-%m-%d %H:%M:%S'), v_data))
+                        except ValueError:
+                            pass
+                if sorted_visits:
+                    sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                    room_id = (sorted_visits[0][1].get('room_id') or '').strip()
+        if room_id:
+            occupied.add(room_id)
+    return occupied
+
 
 # --------------------------
 # Analytics Functions
@@ -653,7 +701,7 @@ def index():
                        class="card-hover bg-white rounded-2xl p-6 shadow-xl border border-gray-100 hover:border-purple-200 group w-full max-w-md">
                         <div class="flex items-center mb-4">
                             <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center group-hover:bg-purple-500 transition-colors">
-                                <i class="fas fa-user-tie text-purple-600 group-hover:text-white text-xl"></i>
+                                <i class="fas fa-user-tie text-blue-600 group-hover:text-white text-xl"></i>
                             </div>
                             <div class="ml-4">
                                 <h3 class="text-xl font-semibold text-gray-800">Employee Management</h3>
@@ -921,7 +969,6 @@ def admin_dashboard():
     chart_type = request.args.get('chart_type', 'all')
     
     analytics = get_visitor_analytics(time_filter, start_date, end_date, start_time, end_time)
-    
     DASHBOARD_HTML = """
     <!DOCTYPE html>
     <html lang="en">
@@ -1799,9 +1846,11 @@ def admin_dashboard():
     </body>
     </html>
     """
-    return render_template_string(DASHBOARD_HTML, analytics=analytics, time_filter=time_filter, 
-                                start_date=start_date, end_date=end_date, start_time=start_time, 
-                                end_time=end_time, chart_type=chart_type)
+    resp = make_response(render_template_string(DASHBOARD_HTML, analytics=analytics, time_filter=time_filter,
+                                start_date=start_date, end_date=end_date, start_time=start_time,
+                                end_time=end_time, chart_type=chart_type))
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, start_time='00:00', end_time='23:59'):
     """Generate comprehensive analytics data from Firebase database with time range filters"""
@@ -3374,6 +3423,186 @@ def upload_invites():
 #                             status_distribution=status_distribution, 
 #                             request=request)
 
+def _parse_visit_date_for_filter(visitor):
+    """Parse visit date for filtering: try visit_date in multiple formats, then last_visit_time."""
+    visit_date_val = visitor.get('visit_date') or ''
+    if visit_date_val and visit_date_val != 'N/A':
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+            try:
+                return datetime.strptime(str(visit_date_val).strip()[:10], fmt).date()
+            except (ValueError, TypeError):
+                continue
+    last = visitor.get('last_visit_time')
+    if last and hasattr(last, 'date'):
+        return last.date()
+    return None
+
+
+def _visitor_export_row(v):
+    """Single export row for CSV (shared by list page and export endpoint)."""
+    return {
+        'unique_id': str(v.get('unique_id', v.get('id', ''))),
+        'name': str(v.get('name', '')),
+        'contact': str(v.get('contact', '')),
+        'purpose': str(v.get('purpose', '')),
+        'status': str(v.get('status', '')),
+        'visit_date': str(v.get('visit_date', '')),
+        'num_visits': v.get('num_visits', 0),
+        'blacklisted': bool(v.get('blacklisted', False)),
+        'blacklist_reason': str(v.get('blacklist_reason', '')),
+        'registered_at': str(v.get('registered_at', '')),
+    }
+
+
+@app.route('/visitors/export')
+def visitors_export():
+    """Export filtered visitors as CSV (uses same filters as /visitors)."""
+    if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+    else:
+        visitors_ref = db.reference('visitors')
+        all_visitors = visitors_ref.get() or {}
+    search_name = request.args.get('search_name', '').lower()
+    search_status = request.args.get('search_status', 'all')
+    start_date = request.args.get('start_date', '')
+    end_date = request.args.get('end_date', '')
+    time_range = request.args.get('time_range', 'all')
+    now = datetime.now()
+    visitors_data = []
+    if all_visitors:
+        for vid, data in all_visitors.items():
+            basic_info = data.get('basic_info', {})
+            visitor_name = str(basic_info.get('name') or 'N/A')
+            visitor_contact = str(basic_info.get('contact') or 'N/A')
+            blacklisted = str(basic_info.get('blacklisted', 'no')).lower() in ['yes', 'true', '1']
+            blacklist_reason = basic_info.get('blacklist_reason', 'No reason provided')
+            visits = data.get('visits', {})
+            current_status = 'Registered'
+            check_in_time = None
+            expected_checkout_time = None
+            purpose = 'N/A'
+            employee_name = 'N/A'
+            visit_date = 'N/A'
+            duration = 'N/A'
+            last_visit_time = None
+            exceeded = False
+            if visits:
+                sorted_visits = []
+                for visit_id, visit_data in visits.items():
+                    visit_timestamp = visit_data.get('created_at') or visit_data.get('check_in_time')
+                    if visit_timestamp:
+                        try:
+                            visit_dt = datetime.strptime(visit_timestamp, "%Y-%m-%d %H:%M:%S")
+                            sorted_visits.append((visit_dt, visit_id, visit_data))
+                        except ValueError:
+                            continue
+                if sorted_visits:
+                    sorted_visits.sort(key=lambda x: x[0], reverse=True)
+                    last_visit_time, _, recent_visit_data = sorted_visits[0]
+                    status_from_visit = recent_visit_data.get('status', 'Registered')
+                    if status_from_visit.lower() in ['checked_out', 'checked-out', 'checked out']:
+                        current_status = 'Checked Out'
+                    elif status_from_visit.lower() in ['checked_in', 'checked-in', 'checked in']:
+                        current_status = 'Checked In'
+                        check_in_time = recent_visit_data.get('check_in_time')
+                        expected_checkout_time = recent_visit_data.get('expected_checkout_time')
+                        if check_in_time and expected_checkout_time:
+                            try:
+                                checkin_dt = datetime.strptime(check_in_time, "%Y-%m-%d %H:%M:%S")
+                                checkout_dt = datetime.strptime(expected_checkout_time, "%Y-%m-%d %H:%M:%S")
+                                if now > checkout_dt:
+                                    exceeded = True
+                                    current_status = 'Exceeded'
+                            except ValueError:
+                                pass
+                    elif status_from_visit.lower() in ['approved', 'approve']:
+                        current_status = 'Approved'
+                    elif status_from_visit.lower() in ['registered', 'register']:
+                        current_status = 'Registered'
+                    elif status_from_visit.lower() in ['rejected', 'reject']:
+                        current_status = 'Rejected'
+                    elif status_from_visit.lower() in ['rescheduled', 'reschedule']:
+                        current_status = 'Rescheduled'
+                    elif status_from_visit.lower() in ['exceeded', 'time_exceeded']:
+                        current_status = 'Exceeded'
+                        exceeded = True
+                    else:
+                        current_status = str(status_from_visit) if status_from_visit else 'Registered'
+                    purpose = recent_visit_data.get('purpose', 'N/A')
+                    employee_name = recent_visit_data.get('employee_name', 'N/A')
+                    visit_date = recent_visit_data.get('visit_date', 'N/A')
+                    duration = recent_visit_data.get('duration', 'N/A')
+            transactions = data.get('transactions', {})
+            num_visits = len(visits) if visits else len(transactions) if isinstance(transactions, dict) else 0
+            registered_at = 'N/A'
+            if transactions:
+                earliest_transaction = min(transactions.keys())
+                registered_at = transactions[earliest_transaction].get('timestamp', 'N/A')
+            visitors_data.append({
+                'id': vid, 'unique_id': vid, 'name': visitor_name, 'contact': visitor_contact,
+                'purpose': purpose, 'status': current_status, 'exceeded': exceeded, 'blacklisted': blacklisted,
+                'blacklist_reason': blacklist_reason, 'transactions': transactions, 'visits': visits,
+                'visit_date': visit_date, 'last_visit_time': last_visit_time, 'check_in_time': check_in_time,
+                'num_visits': num_visits, 'check_out_time': None, 'expected_checkout_time': expected_checkout_time,
+                'registered_at': registered_at, 'employee_name': employee_name, 'duration': duration,
+                'photo_path': basic_info.get('photo_path', 'N/A'), 'profile_link': basic_info.get('profile_link', 'N/A')
+            })
+    filtered_visitors = []
+    for visitor in visitors_data:
+        include_visitor = True
+        name_str = str(visitor.get('name') or 'N/A').lower()
+        if search_name and search_name not in name_str:
+            include_visitor = False
+        visitor_status_normalized = str(visitor.get('status') or '').lower().replace(' ', '_').replace('-', '_')
+        if search_status != 'all' and search_status != visitor_status_normalized:
+            include_visitor = False
+        if start_date and end_date:
+            visit_dt = _parse_visit_date_for_filter(visitor)
+            if visit_dt is not None:
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+                    if not (start_dt <= visit_dt <= end_dt):
+                        include_visitor = False
+                except ValueError:
+                    pass
+        use_time_range = time_range != 'all' and not (start_date and end_date)
+        if use_time_range and visitor.get('last_visit_time'):
+            try:
+                lt = visitor['last_visit_time']
+                if time_range == 'today' and lt.date() != now.date():
+                    include_visitor = False
+                elif time_range == 'week' and lt < (now - timedelta(days=7)):
+                    include_visitor = False
+                elif time_range == 'month' and lt < (now - timedelta(days=30)):
+                    include_visitor = False
+                elif time_range == '<1hr' and lt < (now - timedelta(hours=1)):
+                    include_visitor = False
+                elif time_range == '<3hr' and lt < (now - timedelta(hours=3)):
+                    include_visitor = False
+                elif time_range == '<6hr' and lt < (now - timedelta(hours=6)):
+                    include_visitor = False
+            except (ValueError, TypeError):
+                pass
+        if include_visitor:
+            filtered_visitors.append(visitor)
+    filtered_visitors.sort(key=lambda x: x['last_visit_time'] or datetime.min, reverse=True)
+    export_visitors = [_visitor_export_row(v) for v in filtered_visitors]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['Unique ID', 'Name', 'Contact', 'Purpose', 'Status', 'Visit Date', 'Visits', 'Blacklisted', 'Blacklist Reason', 'Registered At'])
+    for v in export_visitors:
+        writer.writerow([
+            v['unique_id'], v['name'], v['contact'], v['purpose'], v['status'], v['visit_date'],
+            v['num_visits'], 'Yes' if v['blacklisted'] else 'No', v['blacklist_reason'], v['registered_at']
+        ])
+    filename = 'visitors_report_' + datetime.now().strftime('%Y-%m-%d') + '.csv'
+    resp = make_response(buf.getvalue().encode('utf-8-sig'))
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = 'attachment; filename="' + filename + '"'
+    return resp
+
+
 @app.route('/visitors')
 def visitors_list():
     if USE_MOCK_DATA:
@@ -3401,9 +3630,9 @@ def visitors_list():
             # Extract basic_info
             basic_info = data.get('basic_info', {})
             
-            # Get visitor details from basic_info
-            visitor_name = basic_info.get('name', 'N/A')
-            visitor_contact = basic_info.get('contact', 'N/A')
+            # Get visitor details from basic_info (normalize to string for safe filtering/display)
+            visitor_name = str(basic_info.get('name') or 'N/A')
+            visitor_contact = str(basic_info.get('contact') or 'N/A')
             blacklisted = str(basic_info.get('blacklisted', 'no')).lower() in ['yes', 'true', '1']
             blacklist_reason = basic_info.get('blacklist_reason', 'No reason provided')
             
@@ -3469,7 +3698,7 @@ def visitors_list():
                         current_status = 'Exceeded'
                         exceeded = True
                     else:
-                        current_status = status_from_visit  # Use as-is if not recognized
+                        current_status = str(status_from_visit) if status_from_visit else 'Registered'
                     
                     purpose = recent_visit_data.get('purpose', 'N/A')
                     employee_name = recent_visit_data.get('employee_name', 'N/A')
@@ -3519,30 +3748,32 @@ def visitors_list():
     for visitor in visitors_data:
         include_visitor = True
         
-        # Filter by name search
-        if search_name and search_name not in visitor['name'].lower():
+        # Filter by name search (normalize to string to avoid type errors from Firebase)
+        name_str = str(visitor.get('name') or 'N/A').lower()
+        if search_name and search_name not in name_str:
             include_visitor = False
         
-        # Filter by status
+        # Filter by status (normalize to string and consistent format)
+        visitor_status_normalized = str(visitor.get('status') or '').lower().replace(' ', '_').replace('-', '_')
         if search_status != 'all':
-            # Normalize both statuses for comparison
-            visitor_status_normalized = visitor['status'].lower().replace(' ', '_').replace('-', '_')
             if search_status != visitor_status_normalized:
                 include_visitor = False
         
-        # Filter by date range
-        if start_date and end_date and visitor['visit_date'] != 'N/A':
-            try:
-                visit_dt = datetime.strptime(visitor['visit_date'], "%Y-%m-%d")
-                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-                if not (start_dt <= visit_dt <= end_dt):
-                    include_visitor = False
-            except ValueError:
-                pass
+        # Filter by date range (support multiple date formats and fallback to last_visit_time)
+        if start_date and end_date:
+            visit_dt = _parse_visit_date_for_filter(visitor)
+            if visit_dt is not None:
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+                    if not (start_dt <= visit_dt <= end_dt):
+                        include_visitor = False
+                except ValueError:
+                    pass
         
-        # Filter by time range
-        if time_range != 'all' and visitor['last_visit_time']:
+        # Filter by time range (only when no custom date range is set - otherwise it would contradict)
+        use_time_range = time_range != 'all' and not (start_date and end_date)
+        if use_time_range and visitor['last_visit_time']:
             try:
                 if time_range == 'today':
                     if visitor['last_visit_time'].date() != now.date():
@@ -3609,6 +3840,7 @@ def visitors_list():
     showing_start = start_idx + 1 if total_visitors > 0 else 0
     showing_end = min(end_idx, total_visitors)
 
+    export_visitors = [_visitor_export_row(v) for v in filtered_visitors]
     VISITORS_HTML = """
     <!DOCTYPE html>
     <html lang="en">
@@ -3620,7 +3852,13 @@ def visitors_list():
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
             .status-badge {
-                @apply px-3 py-1 rounded-full text-xs font-semibold capitalize;
+                display: inline-flex;
+                align-items: center;
+                padding: 2px 10px;
+                border-radius: 9999px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                text-transform: capitalize;
             }
             .metric-card {
                 transition: all 0.3s ease;
@@ -3648,156 +3886,6 @@ def visitors_list():
                 to { opacity: 1; transform: translateY(0); }
             }
         </style>
-        <script>
-            async function toggleBlacklist(visitorId, currentState) {
-                let reason = '';
-                const newState = !currentState;
-                
-                if (newState) {
-                    reason = prompt("Enter reason for blacklisting this visitor:");
-                    if (!reason) { 
-                        return; 
-                    }
-                }
-                
-                try {
-                    const response = await fetch(`/blacklist/${visitorId}`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ 
-                            blacklisted: newState, 
-                            reason: reason 
-                        })
-                    });
-                    
-                    if (response.ok) { 
-                        location.reload(); 
-                    } else { 
-                        throw new Error('Update failed');
-                    }
-                } catch (error) {
-                    alert("Error updating blacklist status.");
-                }
-            }
-
-            function applyFilters() {
-                const searchName = document.getElementById('searchInput').value;
-                const searchStatus = document.getElementById('statusFilter').value;
-                const startDate = document.getElementById('startDate').value;
-                const endDate = document.getElementById('endDate').value;
-                const timeRange = document.getElementById('timeRange').value;
-                
-                const params = new URLSearchParams();
-                if (searchName) params.append('search_name', searchName);
-                if (searchStatus !== 'all') params.append('search_status', searchStatus);
-                if (startDate) params.append('start_date', startDate);
-                if (endDate) params.append('end_date', endDate);
-                if (timeRange !== 'all') params.append('time_range', timeRange);
-                
-                window.location.href = `${window.location.pathname}?${params.toString()}`;
-            }
-
-            function clearFilters() {
-                window.location.href = window.location.pathname;
-            }
-
-            function exportToCSV() {
-                const headers = ['Unique ID', 'Name', 'Contact', 'Purpose', 'Status', 'Visit Date', 'Visits', 'Blacklisted', 'Blacklist Reason', 'Registered At'];
-                const rows = {{ all_filtered_visitors | tojson }};
-                function esc(v) { return '"' + String(v || '').replace(/"/g, '""') + '"'; }
-                
-                let csvContent = headers.join(',') + '\n';
-                
-                rows.forEach(visitor => {
-                    const row = [
-                        esc(visitor.unique_id),
-                        esc(visitor.name),
-                        esc(visitor.contact),
-                        esc(visitor.purpose),
-                        esc(visitor.status),
-                        esc(visitor.visit_date),
-                        visitor.num_visits,
-                        visitor.blacklisted ? 'Yes' : 'No',
-                        esc(visitor.blacklist_reason),
-                        esc(visitor.registered_at)
-                    ];
-                    csvContent += row.join(',') + '\n';
-                });
-                
-                const blob = new Blob([csvContent], { type: 'text/csv' });
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.setAttribute('hidden', '');
-                a.setAttribute('href', url);
-                a.setAttribute('download', `visitors_report_${new Date().toISOString().split('T')[0]}.csv`);
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-            }
-
-            function changePage(page) {
-                const params = new URLSearchParams(window.location.search);
-                params.set('page', page);
-                window.location.href = `${window.location.pathname}?${params.toString()}`;
-            }
-
-            // Action Functions
-            function viewVisitorDetails(visitorId) {
-                window.open(`/visitor/${visitorId}`, '_blank');
-            }
-
-            function editVisitor(visitorId) {
-                window.open(`/visitor/${visitorId}`, '_blank');
-            }
-
-            function approveVisitor(visitorId) {
-                if (confirm('Are you sure you want to approve this visitor?')) {
-                    fetch(`/visitor/${visitorId}/approve`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'}
-                    }).then(response => {
-                        if (response.ok) location.reload();
-                        else alert('Error approving visitor');
-                    });
-                }
-            }
-
-            function rejectVisitor(visitorId) {
-                const reason = prompt('Enter reason for rejection:');
-                if (reason) {
-                    fetch(`/visitor/${visitorId}/reject`, {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({reason: reason})
-                    }).then(response => {
-                        if (response.ok) location.reload();
-                        else alert('Error rejecting visitor');
-                    });
-                }
-            }
-
-            function checkinVisitor(visitorId) {
-                fetch(`/visitor/${visitorId}/checkin`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'}
-                }).then(response => {
-                    if (response.ok) location.reload();
-                    else alert('Error checking in visitor');
-                });
-            }
-
-            function checkoutVisitor(visitorId) {
-                fetch(`/visitor/${visitorId}/checkout`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'}
-                }).then(response => {
-                    if (response.ok) location.reload();
-                    else alert('Error checking out visitor');
-                });
-            }
-
-            
-        </script>
     </head>
     <body class="min-h-screen bg-gray-50 p-6">
         <div class="max-w-7xl mx-auto space-y-6">
@@ -3815,74 +3903,78 @@ def visitors_list():
                        class="bg-white hover:bg-gray-50 text-red-700 font-medium px-4 py-2 rounded-lg border border-red-200 shadow-sm transition flex items-center">
                         <i class="fas fa-ban mr-2"></i>View blacklisted only
                     </a>
-                    <button onclick="exportToCSV()" 
-                            class="bg-white hover:bg-gray-50 text-gray-700 font-medium px-4 py-2 rounded-lg border border-gray-300 shadow-sm transition flex items-center">
+                    <a href="{{ url_for('visitors_export') }}{% if request.query_string %}?{{ request.query_string.decode() }}{% endif %}" 
+                       class="bg-white hover:bg-gray-50 text-gray-700 font-medium px-4 py-2 rounded-lg border border-gray-300 shadow-sm transition inline-flex items-center">
                         <i class="fas fa-file-export mr-2"></i>Export CSV
-                    </button>
+                    </a>
                 </div>
             </div>
 
-            <!-- Filters Section -->
+            <!-- Filters Section: GET form so filters work without JavaScript -->
             <div class="bg-white rounded-xl p-6 shadow-sm">
                 <h3 class="text-lg font-semibold text-gray-900 mb-4">Filters</h3>
-                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Search by Name</label>
-                        <input type="text" id="searchInput"
-                               placeholder="Enter visitor name..." 
-                               value="{{ request.args.get('search_name', '') }}"
-                               class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Status</label>
-                        <select id="statusFilter" 
-                                class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                            <option value="all" {{ 'selected' if request.args.get('search_status', 'all') == 'all' else '' }}>All Status</option>
-                            <option value="registered" {{ 'selected' if request.args.get('search_status') == 'registered' else '' }}>Registered</option>
-                            <option value="approved" {{ 'selected' if request.args.get('search_status') == 'approved' else '' }}>Approved</option>
-                            <option value="checked_in" {{ 'selected' if request.args.get('search_status') == 'checked_in' else '' }}>Checked In</option>
-                            <option value="checked_out" {{ 'selected' if request.args.get('search_status') == 'checked_out' else '' }}>Checked Out</option>
-                            <option value="rescheduled" {{ 'selected' if request.args.get('search_status') == 'rescheduled' else '' }}>Rescheduled</option>
-                            <option value="rejected" {{ 'selected' if request.args.get('search_status') == 'rejected' else '' }}>Rejected</option>
-                            <option value="exceeded" {{ 'selected' if request.args.get('search_status') == 'exceeded' else '' }}>Exceeded</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Date Range</label>
-                        <div class="space-y-2">
-                            <input type="date" id="startDate"
-                                   value="{{ request.args.get('start_date', '') }}"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                   placeholder="Start date">
-                            <input type="date" id="endDate"
-                                   value="{{ request.args.get('end_date', '') }}"
-                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                   placeholder="End date">
+                <form method="get" action="{{ url_for('visitors_list') }}" id="visitorsFilterForm">
+                    <input type="hidden" name="page" value="1">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Search by Name</label>
+                            <input type="text" name="search_name" id="searchInput"
+                                   placeholder="Enter visitor name..."
+                                   value="{{ request.args.get('search_name', '') }}"
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Status</label>
+                            <select name="search_status" id="statusFilter"
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                                <option value="all" {{ 'selected' if request.args.get('search_status', 'all') == 'all' else '' }}>All Status</option>
+                                <option value="registered" {{ 'selected' if request.args.get('search_status') == 'registered' else '' }}>Registered</option>
+                                <option value="approved" {{ 'selected' if request.args.get('search_status') == 'approved' else '' }}>Approved</option>
+                                <option value="checked_in" {{ 'selected' if request.args.get('search_status') == 'checked_in' else '' }}>Checked In</option>
+                                <option value="checked_out" {{ 'selected' if request.args.get('search_status') == 'checked_out' else '' }}>Checked Out</option>
+                                <option value="rescheduled" {{ 'selected' if request.args.get('search_status') == 'rescheduled' else '' }}>Rescheduled</option>
+                                <option value="rejected" {{ 'selected' if request.args.get('search_status') == 'rejected' else '' }}>Rejected</option>
+                                <option value="exceeded" {{ 'selected' if request.args.get('search_status') == 'exceeded' else '' }}>Exceeded</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Date Range</label>
+                            <div class="space-y-2">
+                                <input type="date" name="start_date" id="startDate"
+                                       value="{{ request.args.get('start_date', '') }}"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                       placeholder="Start date">
+                                <input type="date" name="end_date" id="endDate"
+                                       value="{{ request.args.get('end_date', '') }}"
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                       placeholder="End date">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">Time Range</label>
+                            <select name="time_range" id="timeRange" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                                <option value="all" {{ 'selected' if request.args.get('time_range', 'all') == 'all' else '' }}>All Time</option>
+                                <option value="today" {{ 'selected' if request.args.get('time_range') == 'today' else '' }}>Today</option>
+                                <option value="week" {{ 'selected' if request.args.get('time_range') == 'week' else '' }}>This Week</option>
+                                <option value="month" {{ 'selected' if request.args.get('time_range') == 'month' else '' }}>This Month</option>
+                                <option value="<1hr" {{ 'selected' if request.args.get('time_range') == '<1hr' else '' }}>Last 1 Hour</option>
+                                <option value="<3hr" {{ 'selected' if request.args.get('time_range') == '<3hr' else '' }}>Last 3 Hours</option>
+                                <option value="<6hr" {{ 'selected' if request.args.get('time_range') == '<6hr' else '' }}>Last 6 Hours</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">Ignored when a date range is set above.</p>
                         </div>
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-2">Time Range</label>
-                        <select id="timeRange" class="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
-                            <option value="all" {{ 'selected' if request.args.get('time_range', 'all') == 'all' else '' }}>All Time</option>
-                            <option value="today" {{ 'selected' if request.args.get('time_range') == 'today' else '' }}>Today</option>
-                            <option value="week" {{ 'selected' if request.args.get('time_range') == 'week' else '' }}>This Week</option>
-                            <option value="month" {{ 'selected' if request.args.get('time_range') == 'month' else '' }}>This Month</option>
-                            <option value="<1hr" {{ 'selected' if request.args.get('time_range') == '<1hr' else '' }}>Last 1 Hour</option>
-                            <option value="<3hr" {{ 'selected' if request.args.get('time_range') == '<3hr' else '' }}>Last 3 Hours</option>
-                            <option value="<6hr" {{ 'selected' if request.args.get('time_range') == '<6hr' else '' }}>Last 6 Hours</option>
-                        </select>
+                    <div class="flex gap-3 mt-4">
+                        <button type="submit"
+                                class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg transition">
+                            Apply Filters
+                        </button>
+                        <a href="{{ url_for('visitors_list') }}"
+                           class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-2 px-6 rounded-lg transition inline-block">
+                            Clear All
+                        </a>
                     </div>
-                </div>
-                <div class="flex gap-3 mt-4">
-                    <button onclick="applyFilters()" 
-                            class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg transition">
-                        Apply Filters
-                    </button>
-                    <button onclick="clearFilters()" 
-                            class="bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-2 px-6 rounded-lg transition">
-                        Clear All
-                    </button>
-                </div>
+                </form>
             </div>
 
             <!-- Key Metrics -->
@@ -4029,7 +4121,6 @@ def visitors_list():
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visits</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Blacklist</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                             </tr>
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
@@ -4082,47 +4173,16 @@ def visitors_list():
                                     </div>
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
-                                    <label class="relative inline-flex items-center cursor-pointer">
-                                        <input type="checkbox" {{ 'checked' if visitor.blacklisted else '' }} 
-                                               class="sr-only peer"
-                                               onchange="toggleBlacklist('{{ visitor.id }}', {{ 'true' if visitor.blacklisted else 'false' }})">
-                                        <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-600"></div>
-                                    </label>
                                     {% if visitor.blacklisted %}
-                                    <div class="text-xs text-gray-500 mt-1 max-w-xs truncate" title="{{ visitor.blacklist_reason }}">
-                                        {{ visitor.blacklist_reason }}
-                                    </div>
+                                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                                        <i class="fas fa-ban mr-1"></i>Blacklisted
+                                    </span>
+                                    <div class="text-xs text-gray-500 mt-1 max-w-xs truncate" title="{{ visitor.blacklist_reason }}">{{ visitor.blacklist_reason }}</div>
+                                    <a href="{{ url_for('visitor_detail', visitor_id=visitor.id) }}#blacklist" class="text-xs text-blue-600 hover:underline mt-1 inline-block">Manage</a>
+                                    {% else %}
+                                    <span class="text-gray-400 text-sm">—</span>
+                                    <a href="{{ url_for('visitor_detail', visitor_id=visitor.id) }}#blacklist" class="text-xs text-blue-600 hover:underline mt-1 inline-block">Add to blacklist</a>
                                     {% endif %}
-                                </td>
-                                <td class="px-6 py-4 whitespace-nowrap">
-                                    <div class="flex items-center gap-2">
-                                        {% if visitor.status == 'Registered' %}
-                                        <button onclick="approveVisitor('{{ visitor.id }}')" 
-                                                class="text-emerald-600 hover:text-emerald-900 transition-colors" 
-                                                title="Approve Visit">
-                                            <i class="fas fa-check"></i>
-                                        </button>
-                                        <button onclick="rejectVisitor('{{ visitor.id }}')" 
-                                                class="text-red-600 hover:text-red-900 transition-colors" 
-                                                title="Reject Visit">
-                                            <i class="fas fa-times"></i>
-                                        </button>
-                                        {% endif %}
-                                        {% if visitor.status == 'Approved' %}
-                                        <button onclick="checkinVisitor('{{ visitor.id }}')" 
-                                                class="text-blue-600 hover:text-blue-900 transition-colors" 
-                                                title="Check In">
-                                            <i class="fas fa-sign-in-alt"></i>
-                                        </button>
-                                        {% endif %}
-                                        {% if visitor.status == 'Checked In' %}
-                                        <button onclick="checkoutVisitor('{{ visitor.id }}')" 
-                                                class="text-purple-600 hover:text-purple-900 transition-colors" 
-                                                title="Check Out">
-                                            <i class="fas fa-sign-out-alt"></i>
-                                        </button>
-                                        {% endif %}
-                                    </div>
                                 </td>
                             </tr>
                             {% endfor %}
@@ -4170,27 +4230,38 @@ def visitors_list():
                 {% endif %}
             </div>
         </div>
+
+        <script>
+            function changePage(page) {
+                var params = new URLSearchParams(window.location.search);
+                params.set('page', page);
+                window.location.href = window.location.pathname + '?' + params.toString();
+            }
+        </script>
     </body>
     </html>
     """
-    return render_template_string(VISITORS_HTML, 
-                            paginated_visitors=paginated_visitors, 
+    resp = make_response(render_template_string(VISITORS_HTML,
+                            paginated_visitors=paginated_visitors,
                             all_filtered_visitors=filtered_visitors,
-                            total_visitors=total_visitors, 
-                            registered_count=registered_count, 
+                            export_visitors=export_visitors,
+                            total_visitors=total_visitors,
+                            registered_count=registered_count,
                             approved_count=approved_count,
-                            checked_in_count=checked_in_count, 
+                            checked_in_count=checked_in_count,
                             checked_out_count=checked_out_count,
-                            rescheduled_count=rescheduled_count, 
+                            rescheduled_count=rescheduled_count,
                             rejected_count=rejected_count,
-                            exceeded_count=exceeded_count, 
+                            exceeded_count=exceeded_count,
                             blacklisted_count=blacklisted_count,
-                            status_distribution=status_distribution, 
+                            status_distribution=status_distribution,
                             request=request,
                             page=page,
                             total_pages=total_pages,
                             showing_start=showing_start,
-                            showing_end=showing_end)
+                            showing_end=showing_end))
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
 
 
 def _build_visitor_list_from_raw(all_visitors):
@@ -4208,6 +4279,7 @@ def _build_visitor_list_from_raw(all_visitors):
         raw_bl = basic_info.get('blacklisted', 'no')
         blacklisted = raw_bl is True or (isinstance(raw_bl, str) and raw_bl.strip().lower() in ['yes', 'true', '1'])
         blacklist_reason = basic_info.get('blacklist_reason', 'No reason provided')
+        blacklisted_at = basic_info.get('blacklisted_at', '') or ''
         visits = data.get('visits') or {}
         current_status = 'Registered'
         check_in_time = None
@@ -4285,6 +4357,7 @@ def _build_visitor_list_from_raw(all_visitors):
             'exceeded': exceeded,
             'blacklisted': blacklisted,
             'blacklist_reason': blacklist_reason,
+            'blacklisted_at': blacklisted_at,
             'transactions': transactions,
             'visits': visits,
             'visit_date': visit_date,
@@ -4336,6 +4409,24 @@ def blacklist_page():
         <style>
             .card-hover { transition: all 0.2s ease; }
             .card-hover:hover { box-shadow: 0 10px 25px -5px rgba(0,0,0,0.08); }
+            #toast-container { position: fixed; top: 1rem; right: 1rem; z-index: 9999; display: flex; flex-direction: column; gap: 0.5rem; pointer-events: none; }
+            .toast { padding: 0.75rem 1.25rem; border-radius: 0.5rem; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.15); font-medium; pointer-events: auto; animation: toast-in 0.25s ease; }
+            .toast.success { background: #10b981; color: white; }
+            .toast.error { background: #ef4444; color: white; }
+            @keyframes toast-in { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+            .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9000; display: flex; align-items: center; justify-content: center; padding: 1rem; opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; }
+            .modal-overlay.show { opacity: 1; visibility: visible; }
+            .modal-box { background: white; border-radius: 0.75rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); max-width: 28rem; width: 100%; padding: 1.5rem; }
+            .modal-box h3 { margin: 0 0 1rem 0; font-size: 1.125rem; font-weight: 600; color: #111; }
+            .modal-box textarea { width: 100%; min-height: 100px; padding: 0.5rem 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; font-size: 0.875rem; resize: vertical; box-sizing: border-box; }
+            .modal-box .modal-actions { margin-top: 1rem; display: flex; gap: 0.5rem; justify-content: flex-end; }
+            .modal-box .modal-actions button { padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 500; font-size: 0.875rem; cursor: pointer; }
+            .modal-box .modal-actions .btn-primary { background: #2563eb; color: white; border: none; }
+            .modal-box .modal-actions .btn-primary:hover { background: #1d4ed8; }
+            .modal-box .modal-actions .btn-secondary { background: #e5e7eb; color: #374151; border: none; }
+            .modal-box .modal-actions .btn-secondary:hover { background: #d1d5db; }
+            .modal-box .modal-actions .btn-danger { background: #dc2626; color: white; border: none; }
+            .modal-box .modal-actions .btn-danger:hover { background: #b91c1c; }
         </style>
     </head>
     <body class="bg-gray-50 min-h-screen">
@@ -4347,6 +4438,9 @@ def blacklist_page():
                         <p class="text-sm text-gray-600 mt-1">View details and remove visitors from the blacklist. Total: <strong>{{ total_blacklisted }}</strong></p>
                     </div>
                     <div class="flex items-center gap-3">
+                        <a href="{{ url_for('blacklist_export') }}" class="inline-flex items-center px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-gray-700 font-medium text-sm">
+                            <i class="fas fa-file-export mr-2"></i>Export CSV
+                        </a>
                         <a href="{{ url_for('index') }}" class="text-gray-600 hover:text-gray-900 flex items-center">
                             <i class="fas fa-home mr-2"></i>Admin Home
                         </a>
@@ -4387,7 +4481,10 @@ def blacklist_page():
                                 </div>
                                 <div class="mt-4 p-3 bg-red-50 rounded-lg border border-red-100">
                                     <p class="text-xs font-medium text-red-800 uppercase tracking-wide">Blacklist reason</p>
-                                    <p class="text-sm text-gray-800 mt-1">{{ visitor.blacklist_reason }}</p>
+                                    <p class="text-sm text-gray-800 mt-1" id="reason-{{ visitor.id|e }}">{{ visitor.blacklist_reason }}</p>
+                                    {% if visitor.blacklisted_at %}
+                                    <p class="text-xs text-gray-500 mt-2">Added on {{ visitor.blacklisted_at }}</p>
+                                    {% endif %}
                                 </div>
                                 <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-2 text-sm">
                                     <div><span class="text-gray-500">Visits:</span> <span class="text-gray-900">{{ visitor.num_visits }}</span></div>
@@ -4401,9 +4498,12 @@ def blacklist_page():
                                 </div>
                             </div>
                             <div class="flex flex-col gap-2 shrink-0">
-                                <a href="{{ url_for('visitor_detail', visitor_id=visitor.id) }}" class="inline-flex items-center justify-center px-4 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 text-sm font-medium">
+                                <a href="{{ url_for('visitor_detail', visitor_id=visitor.id) }}#blacklist" class="inline-flex items-center justify-center px-4 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 text-sm font-medium">
                                     <i class="fas fa-user mr-2"></i>View full profile
                                 </a>
+                                <button type="button" class="edit-reason-btn inline-flex items-center justify-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium" data-visitor-id="{{ visitor.id|e }}" data-current-reason="{{ visitor.blacklist_reason|e }}">
+                                    <i class="fas fa-edit mr-2"></i>Edit reason
+                                </button>
                                 <button type="button" class="remove-from-blacklist-btn inline-flex items-center justify-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium" data-visitor-id="{{ visitor.id|e }}">
                                     <i class="fas fa-user-check mr-2"></i>Remove from blacklist
                                 </button>
@@ -4428,26 +4528,114 @@ def blacklist_page():
             {% endif %}
         </div>
 
+        <div id="toast-container" aria-live="polite"></div>
+
+        <div id="edit-reason-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="edit-reason-title">
+            <div class="modal-box">
+                <h3 id="edit-reason-title">Edit blacklist reason</h3>
+                <textarea id="edit-reason-input" placeholder="Enter reason..." aria-label="Blacklist reason"></textarea>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="edit-reason-cancel">Cancel</button>
+                    <button type="button" class="btn-primary" id="edit-reason-save">Save</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="remove-confirm-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="remove-confirm-title">
+            <div class="modal-box">
+                <h3 id="remove-confirm-title">Remove from blacklist?</h3>
+                <p class="text-sm text-gray-600 mt-1">This visitor will be able to check in again.</p>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="remove-confirm-cancel">Cancel</button>
+                    <button type="button" class="btn-danger" id="remove-confirm-yes">Remove from blacklist</button>
+                </div>
+            </div>
+        </div>
+
         <script>
-            document.querySelectorAll('.remove-from-blacklist-btn').forEach(btn => {
-                btn.addEventListener('click', async function() {
-                    const visitorId = this.getAttribute('data-visitor-id');
-                    if (!visitorId || !confirm('Remove this visitor from the blacklist? They will be able to check in again.')) return;
-                    try {
-                        const response = await fetch('/blacklist/' + encodeURIComponent(visitorId), {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ blacklisted: false, reason: '' })
-                        });
-                        const data = await response.json();
-                        if (data.success) {
-                            window.location.reload();
-                        } else {
-                            alert('Error: ' + (data.message || 'Could not update blacklist.'));
-                        }
-                    } catch (e) {
-                        alert('Error: Could not update blacklist.');
-                    }
+            document.addEventListener('DOMContentLoaded', function() {
+                var toastContainer = document.getElementById('toast-container');
+                function showToast(message, type) {
+                    type = type || 'success';
+                    var el = document.createElement('div');
+                    el.className = 'toast ' + type;
+                    el.setAttribute('role', 'status');
+                    el.textContent = message;
+                    toastContainer.appendChild(el);
+                    setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 5000);
+                }
+                function doBlacklistPost(visitorId, blacklisted, reason, doneMsg) {
+                    var url = '/blacklist/' + encodeURIComponent(visitorId);
+                    fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ blacklisted: blacklisted, reason: reason || '' })
+                    }).then(function(r) { return r.text(); }).then(function(text) {
+                        var data;
+                        try { data = JSON.parse(text); } catch (_) { showToast('Server error or invalid response.', 'error'); return; }
+                        if (data.success) { showToast(data.message || (blacklisted ? 'Reason updated.' : 'Removed from blacklist.'), 'success'); window.location.reload(); }
+                        else showToast('Error: ' + (data.message || 'Request failed'), 'error');
+                    }).catch(function(e) { showToast('Error: ' + (e.message || 'Could not update blacklist.'), 'error'); });
+                }
+
+                var editModal = document.getElementById('edit-reason-modal');
+                var editInput = document.getElementById('edit-reason-input');
+                var editSave = document.getElementById('edit-reason-save');
+                var editCancel = document.getElementById('edit-reason-cancel');
+                var pendingEditVisitorId = null;
+                function openEditReasonModal(visitorId, currentReason) {
+                    pendingEditVisitorId = visitorId;
+                    editInput.value = currentReason || '';
+                    editModal.classList.add('show');
+                    editInput.focus();
+                }
+                function closeEditReasonModal() {
+                    editModal.classList.remove('show');
+                    pendingEditVisitorId = null;
+                }
+                editCancel.addEventListener('click', closeEditReasonModal);
+                editModal.addEventListener('click', function(e) { if (e.target === editModal) closeEditReasonModal(); });
+                editSave.addEventListener('click', function() {
+                    var reason = (editInput.value || '').trim();
+                    if (!reason) { showToast('Reason cannot be empty.', 'error'); return; }
+                    if (!pendingEditVisitorId) return;
+                    closeEditReasonModal();
+                    doBlacklistPost(pendingEditVisitorId, true, reason, 'updated');
+                });
+
+                var removeModal = document.getElementById('remove-confirm-modal');
+                var removeYes = document.getElementById('remove-confirm-yes');
+                var removeCancel = document.getElementById('remove-confirm-cancel');
+                var pendingRemoveVisitorId = null;
+                function openRemoveConfirmModal(visitorId) {
+                    pendingRemoveVisitorId = visitorId;
+                    removeModal.classList.add('show');
+                }
+                function closeRemoveConfirmModal() {
+                    removeModal.classList.remove('show');
+                    pendingRemoveVisitorId = null;
+                }
+                removeCancel.addEventListener('click', closeRemoveConfirmModal);
+                removeModal.addEventListener('click', function(e) { if (e.target === removeModal) closeRemoveConfirmModal(); });
+                removeYes.addEventListener('click', function() {
+                    if (!pendingRemoveVisitorId) return;
+                    var vid = pendingRemoveVisitorId;
+                    closeRemoveConfirmModal();
+                    doBlacklistPost(vid, false, '', 'removed');
+                });
+
+                document.querySelectorAll('.remove-from-blacklist-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var visitorId = btn.getAttribute('data-visitor-id');
+                        if (visitorId) openRemoveConfirmModal(visitorId);
+                    });
+                });
+                document.querySelectorAll('.edit-reason-btn').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var visitorId = btn.getAttribute('data-visitor-id');
+                        var currentReason = btn.getAttribute('data-current-reason') || '';
+                        if (visitorId) openEditReasonModal(visitorId, currentReason);
+                    });
                 });
             });
         </script>
@@ -4465,28 +4653,73 @@ def blacklist_page():
     )
 
 
+@app.route('/blacklist/export')
+def blacklist_export():
+    """Export blacklisted visitors as CSV."""
+    if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+    else:
+        visitors_ref = db.reference('visitors')
+        all_visitors = visitors_ref.get() or {}
+    visitors_data = _build_visitor_list_from_raw(all_visitors)
+    filtered = [v for v in visitors_data if v.get('blacklisted')]
+    filtered.sort(key=lambda x: x.get('blacklisted_at') or '', reverse=True)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['Unique ID', 'Name', 'Contact', 'Email', 'Company', 'Blacklist Reason', 'Blacklisted At', 'Visits', 'Last Visit', 'Status'])
+    for v in filtered:
+        writer.writerow([
+            v.get('unique_id', ''),
+            v.get('name', ''),
+            v.get('contact', ''),
+            v.get('email', ''),
+            v.get('company', ''),
+            v.get('blacklist_reason', ''),
+            v.get('blacklisted_at', ''),
+            v.get('num_visits', 0),
+            v.get('visit_date', ''),
+            v.get('status', ''),
+        ])
+    filename = 'blacklist_report_' + datetime.now().strftime('%Y-%m-%d') + '.csv'
+    resp = make_response(buf.getvalue().encode('utf-8-sig'))
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = 'attachment; filename="' + filename + '"'
+    return resp
+
+
 @app.route('/blacklist/<visitor_id>', methods=['POST'])
 def toggle_blacklist(visitor_id):
-    """Toggle blacklist status for a visitor (updates basic_info only)."""
+    """Toggle or update blacklist status for a visitor (updates basic_info; stores blacklisted_at when adding)."""
     try:
         data = request.get_json() or {}
         blacklisted = data.get('blacklisted', False)
-        reason = data.get('reason', 'No reason provided')
+        reason = (data.get('reason') or '').strip() or 'No reason provided'
 
         if USE_MOCK_DATA:
+            _MOCK_BLACKLIST_STATE[visitor_id] = {
+                'blacklisted': blacklisted,
+                'reason': reason if blacklisted else 'No reason provided',
+                'blacklisted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if blacklisted else ''
+            }
             return jsonify({
                 'success': True,
-                'message': f'Visitor {"blacklisted" if blacklisted else "unblacklisted"} successfully (mock mode)'
+                'message': f'Visitor {"blacklisted" if blacklisted else "unblacklisted"} successfully'
             })
 
         visitors_ref = db.reference('visitors')
         visitor_ref = visitors_ref.child(visitor_id)
+        basic_info_ref = visitor_ref.child('basic_info')
 
-        # Update blacklist status in basic_info only
-        visitor_ref.child('basic_info').update({
+        update_payload = {
             'blacklisted': 'yes' if blacklisted else 'no',
             'blacklist_reason': reason if blacklisted else 'No reason provided'
-        })
+        }
+        if blacklisted:
+            update_payload['blacklisted_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            update_payload['blacklisted_at'] = ''
+
+        basic_info_ref.update(update_payload)
 
         return jsonify({
             'success': True,
@@ -4520,16 +4753,35 @@ def _get_most_recent_visit_id(visitor_data):
     return sorted_visits[0][1], sorted_visits[0][2]
 
 
+def _is_visitor_blacklisted(visitor_data):
+    """Return True if visitor is blacklisted (basic_info.blacklisted or top-level blacklisted)."""
+    if not visitor_data:
+        return False
+    basic_info = visitor_data.get('basic_info') or {}
+    raw = basic_info.get('blacklisted', visitor_data.get('blacklisted', 'no'))
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ('yes', 'true', '1')
+
+
 @app.route('/visitor/<visitor_id>/approve', methods=['POST'])
 def visitor_approve(visitor_id):
-    """Set visitor status to Approved (most recent visit + top-level)."""
+    """Set visitor status to Approved (most recent visit + top-level). Blocked if visitor is blacklisted."""
     if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+        data = all_visitors.get(visitor_id)
+        if not data:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        if _is_visitor_blacklisted(data):
+            return jsonify({'success': False, 'message': 'Cannot approve: visitor is blacklisted.'}), 403
         return jsonify({'success': True})
     try:
         ref = db.reference(f'visitors/{visitor_id}')
         data = ref.get()
         if not data:
             return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        if _is_visitor_blacklisted(data):
+            return jsonify({'success': False, 'message': 'Cannot approve: visitor is blacklisted.'}), 403
         visit_id, _ = _get_most_recent_visit_id(data)
         if visit_id:
             ref.child('visits').child(visit_id).update({'status': 'Approved'})
@@ -4560,18 +4812,26 @@ def visitor_reject(visitor_id):
 
 @app.route('/visitor/<visitor_id>/checkin', methods=['POST'])
 def visitor_checkin(visitor_id):
-    """Set visitor status to Checked In, set check_in_time and expected_checkout_time."""
+    """Set visitor status to Checked In, set check_in_time and expected_checkout_time. Blocked if visitor is blacklisted."""
     now = datetime.now()
     checkout_at = now + timedelta(hours=2)
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
     checkout_str = checkout_at.strftime('%Y-%m-%d %H:%M:%S')
     if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+        data = all_visitors.get(visitor_id)
+        if not data:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        if _is_visitor_blacklisted(data):
+            return jsonify({'success': False, 'message': 'Cannot check in: visitor is blacklisted.'}), 403
         return jsonify({'success': True})
     try:
         ref = db.reference(f'visitors/{visitor_id}')
         data = ref.get()
         if not data:
             return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        if _is_visitor_blacklisted(data):
+            return jsonify({'success': False, 'message': 'Cannot check in: visitor is blacklisted.'}), 403
         visit_id, _ = _get_most_recent_visit_id(data)
         if visit_id:
             ref.child('visits').child(visit_id).update({
@@ -4703,6 +4963,7 @@ def visitor_detail(visitor_id):
     else:
         blacklisted = bool(raw_blacklist)
     blacklist_reason = basic_info.get('blacklist_reason', 'No reason provided')
+    blacklisted_at = basic_info.get('blacklisted_at', '') or ''
     
     # Get photo information - use photo_url from basic_info
     photo_url = basic_info.get('photo_url', '')
@@ -4820,6 +5081,7 @@ def visitor_detail(visitor_id):
         'status': status,
         'blacklisted': blacklisted,
         'blacklist_reason': blacklist_reason,
+        'blacklisted_at': blacklisted_at,
         'transactions': transactions,
         'visits': visits,
         'visit_history': visit_history,
@@ -4844,7 +5106,13 @@ def visitor_detail(visitor_id):
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
             .status-badge {
-                @apply px-3 py-1 rounded-full text-xs font-semibold capitalize;
+                display: inline-flex;
+                align-items: center;
+                padding: 2px 10px;
+                border-radius: 9999px;
+                font-size: 0.75rem;
+                font-weight: 600;
+                text-transform: capitalize;
             }
             .card-hover {
                 transition: all 0.3s ease;
@@ -4896,79 +5164,117 @@ def visitor_detail(visitor_id):
             input:checked + .toggle-slider:before {
                 transform: translateX(26px);
             }
+            .detail-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9000; display: flex; align-items: center; justify-content: center; padding: 1rem; opacity: 0; visibility: hidden; transition: opacity 0.2s, visibility 0.2s; }
+            .detail-modal-overlay.show { opacity: 1; visibility: visible; }
+            .detail-modal-box { background: white; border-radius: 0.75rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.25); max-width: 28rem; width: 100%; padding: 1.5rem; }
+            .detail-modal-box h3 { margin: 0 0 1rem 0; font-size: 1.125rem; font-weight: 600; color: #111; }
+            .detail-modal-box textarea { width: 100%; min-height: 100px; padding: 0.5rem 0.75rem; border: 1px solid #d1d5db; border-radius: 0.5rem; font-size: 0.875rem; resize: vertical; box-sizing: border-box; }
+            .detail-modal-box .modal-actions { margin-top: 1rem; display: flex; gap: 0.5rem; justify-content: flex-end; }
+            .detail-modal-box .modal-actions button { padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 500; font-size: 0.875rem; cursor: pointer; }
+            .detail-modal-box .modal-actions .btn-primary { background: #2563eb; color: white; border: none; }
+            .detail-modal-box .modal-actions .btn-primary:hover { background: #1d4ed8; }
+            .detail-modal-box .modal-actions .btn-secondary { background: #e5e7eb; color: #374151; border: none; }
+            .detail-modal-box .modal-actions .btn-secondary:hover { background: #d1d5db; }
+            .detail-modal-box .modal-actions .btn-danger { background: #dc2626; color: white; border: none; }
+            .detail-modal-box .modal-actions .btn-danger:hover { background: #b91c1c; }
         </style>
         <script>
-            // Blacklist functionality for visitor details page
-            async function toggleBlacklistDetail(checkboxEl) {
-                const visitorId = checkboxEl.getAttribute('data-visitor-id');
-                const initialBlacklisted = checkboxEl.getAttribute('data-initial-blacklisted') === 'true';
-                let reason = '';
-                const newState = checkboxEl.checked;
-
-                if (newState) {
-                    reason = prompt("Enter reason for blacklisting this visitor:");
-                    if (reason === null) {
-                        checkboxEl.checked = initialBlacklisted;
-                        return;
-                    }
-                    if (!reason.trim()) {
-                        alert("Reason is required for blacklisting.");
-                        checkboxEl.checked = initialBlacklisted;
-                        return;
-                    }
-                } else {
-                    if (!confirm('Are you sure you want to remove this visitor from blacklist?')) {
-                        checkboxEl.checked = initialBlacklisted;
-                        return;
-                    }
-                    reason = 'No reason provided';
-                }
-
+            async function doBlacklistAction(visitorId, blacklisted, reason) {
                 try {
-                    const response = await fetch('/blacklist/' + encodeURIComponent(visitorId), {
+                    const r = await fetch('/blacklist/' + encodeURIComponent(visitorId), {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ blacklisted: newState, reason: reason })
+                        body: JSON.stringify({ blacklisted: blacklisted, reason: reason || '' })
                     });
-                    const result = await response.json();
-                    if (result.success) {
-                        showNotification(result.message, 'success');
-                        setTimeout(() => location.reload(), 1000);
-                    } else {
-                        throw new Error(result.message);
-                    }
-                } catch (error) {
-                    showNotification('Error: ' + error.message, 'error');
-                    checkboxEl.checked = initialBlacklisted;
-                }
+                    const text = await r.text();
+                    let result;
+                    try { result = JSON.parse(text); } catch (_) { throw new Error(r.status ? 'Server error ' + r.status : 'Invalid response'); }
+                    if (result.success) { showNotification(result.message, 'success'); setTimeout(function() { location.reload(); }, 1000); }
+                    else throw new Error(result.message || 'Request failed');
+                } catch (e) { showNotification('Error: ' + e.message, 'error'); }
             }
+            function showNotification(message, type) {
+                var existing = document.getElementById('visitor-detail-notification');
+                if (existing) existing.remove();
+                var el = document.createElement('div');
+                el.id = 'visitor-detail-notification';
+                el.className = 'fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg text-white font-medium ' + (type === 'success' ? 'bg-green-500' : type === 'error' ? 'bg-red-500' : 'bg-blue-500');
+                el.textContent = message;
+                document.body.appendChild(el);
+                setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 5000);
+            }
+            document.addEventListener('DOMContentLoaded', function() {
+                var reasonModal = document.getElementById('detail-reason-modal');
+                var reasonTitle = document.getElementById('detail-reason-title');
+                var reasonInput = document.getElementById('detail-reason-input');
+                var reasonSave = document.getElementById('detail-reason-save');
+                var reasonCancel = document.getElementById('detail-reason-cancel');
+                function openReasonModal(title, initialValue, onSave) {
+                    reasonTitle.textContent = title;
+                    reasonInput.value = initialValue || '';
+                    reasonModal.classList.add('show');
+                    reasonInput.focus();
+                    reasonSave.onclick = function() {
+                        var reason = (reasonInput.value || '').trim();
+                        if (!reason) { showNotification('Reason cannot be empty.', 'error'); return; }
+                    reasonModal.classList.remove('show');
+                    onSave(reason);
+                    };
+                }
+                function closeReasonModal() {
+                    reasonModal.classList.remove('show');
+                }
+                reasonCancel.addEventListener('click', closeReasonModal);
+                reasonModal.addEventListener('click', function(e) { if (e.target === reasonModal) closeReasonModal(); });
 
-            // Notification function for visitor details page
-            function showNotification(message, type = 'info') {
-                // Remove existing notification
-                const existingNotification = document.getElementById('visitor-detail-notification');
-                if (existingNotification) {
-                    existingNotification.remove();
+                var removeModal = document.getElementById('detail-remove-confirm-modal');
+                var removeYes = document.getElementById('detail-remove-confirm-yes');
+                var removeCancel = document.getElementById('detail-remove-confirm-cancel');
+                var pendingRemoveVisitorId = null;
+                function openRemoveConfirmModal(visitorId, onConfirm) {
+                    pendingRemoveVisitorId = visitorId;
+                    removeModal.classList.add('show');
+                    removeYes.onclick = function() {
+                        removeModal.classList.remove('show');
+                        var vid = pendingRemoveVisitorId;
+                        pendingRemoveVisitorId = null;
+                        if (vid) onConfirm(vid);
+                    };
                 }
-                
-                const notification = document.createElement('div');
-                notification.id = 'visitor-detail-notification';
-                notification.className = `fixed top-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg text-white font-medium transform transition-transform duration-300 ${
-                    type === 'success' ? 'bg-green-500' : 
-                    type === 'error' ? 'bg-red-500' : 
-                    'bg-blue-500'
-                }`;
-                notification.textContent = message;
-                
-                document.body.appendChild(notification);
-                
-                // Auto remove after 5 seconds
-                setTimeout(() => {
-                    if (notification.parentNode) {
-                        notification.parentNode.removeChild(notification);
-                    }
-                }, 5000);
-            }
+                function closeRemoveConfirmModal() {
+                    removeModal.classList.remove('show');
+                    pendingRemoveVisitorId = null;
+                }
+                removeCancel.addEventListener('click', closeRemoveConfirmModal);
+                removeModal.addEventListener('click', function(e) { if (e.target === removeModal) closeRemoveConfirmModal(); });
+
+                document.querySelectorAll('.btn-add-blacklist-detail').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var visitorId = btn.getAttribute('data-visitor-id');
+                        if (!visitorId) return;
+                        openReasonModal('Add to blacklist', '', function(reason) {
+                            doBlacklistAction(visitorId, true, reason);
+                        });
+                    });
+                });
+                document.querySelectorAll('.btn-remove-blacklist-detail').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var visitorId = btn.getAttribute('data-visitor-id');
+                        if (visitorId) openRemoveConfirmModal(visitorId, function(vid) { doBlacklistAction(vid, false, ''); });
+                    });
+                });
+                document.querySelectorAll('.btn-edit-reason-detail').forEach(function(btn) {
+                    btn.addEventListener('click', function() {
+                        var visitorId = btn.getAttribute('data-visitor-id');
+                        var currentReason = btn.getAttribute('data-current-reason') || '';
+                        if (!visitorId) return;
+                        openReasonModal('Edit blacklist reason', currentReason, function(reason) {
+                            doBlacklistAction(visitorId, true, reason);
+                        });
+                    });
+                });
+            });
+
         </script>
     </head>
     <body class="min-h-screen bg-gray-50">
@@ -5161,32 +5467,40 @@ def visitor_detail(visitor_id):
                     </div>
 
                     <!-- Security & Actions -->
-                    <div class="space-y-6">
-                        <!-- Blacklist Status with Toggle -->
-                        <div class="bg-white rounded-xl border {% if visitor.blacklisted %}border-red-300 bg-red-50{% else %}border-green-300 bg-green-50{% endif %} p-6 card-hover">
-                            <div class="flex items-center justify-between mb-4">
-                                <h4 class="font-semibold text-gray-900 flex items-center">
-                                    <i class="fas fa-{% if visitor.blacklisted %}ban text-red-600{% else %}check-circle text-green-600{% endif %} mr-2"></i>
-                                    Blacklist Status
-                                </h4>
-                                <div class="flex items-center space-x-3">
-                                    <span class="status-badge {% if visitor.blacklisted %}bg-red-100 text-red-800{% else %}bg-green-100 text-green-800{% endif %}">
-                                        {% if visitor.blacklisted %}BLACKLISTED{% else %}CLEAN{% endif %}
-                                    </span>
-                                    <label class="toggle-switch">
-                                        <input type="checkbox" id="blacklist-toggle-detail"
-                                               {{ 'checked' if visitor.blacklisted else '' }}
-                                               data-visitor-id="{{ visitor.id|e }}"
-                                               data-initial-blacklisted="{{ 'true' if visitor.blacklisted else 'false' }}"
-                                               onchange="toggleBlacklistDetail(this)">
-                                        <span class="toggle-slider"></span>
-                                    </label>
-                                </div>
+                    <div class="space-y-6" id="blacklist">
+                        <!-- Blacklist module: add / remove / edit from here only -->
+                        <div class="bg-white rounded-xl border {% if visitor.blacklisted %}border-red-300 bg-red-50{% else %}border-gray-200{% endif %} p-6 card-hover">
+                            <h4 class="font-semibold text-gray-900 mb-4 flex items-center">
+                                <i class="fas fa-ban text-red-600 mr-2"></i>
+                                Blacklist
+                            </h4>
+                            {% if visitor.blacklisted %}
+                            <p class="text-sm text-gray-700 mb-2"><strong>Reason:</strong> {{ visitor.blacklist_reason }}</p>
+                            {% if visitor.blacklisted_at %}
+                            <p class="text-xs text-gray-500 mb-4">Added on {{ visitor.blacklisted_at }}</p>
+                            {% endif %}
+                            <div class="flex flex-wrap gap-2">
+                                <button type="button" class="btn-remove-blacklist-detail inline-flex items-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium" data-visitor-id="{{ visitor.id|e }}">
+                                    <i class="fas fa-user-check mr-2"></i>Remove from blacklist
+                                </button>
+                                <button type="button" class="btn-edit-reason-detail inline-flex items-center px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium" data-visitor-id="{{ visitor.id|e }}" data-current-reason="{{ visitor.blacklist_reason|e }}">
+                                    <i class="fas fa-edit mr-2"></i>Edit reason
+                                </button>
+                                <a href="{{ url_for('blacklist_page') }}" class="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 text-sm font-medium">
+                                    <i class="fas fa-list mr-2"></i>View all blacklisted
+                                </a>
                             </div>
-                            <p class="text-sm text-gray-600">
-                                <i class="fas fa-info-circle mr-1"></i>
-                                {{ visitor.blacklist_reason if visitor.blacklist_reason != 'No reason provided' else 'No blacklist issues' }}
-                            </p>
+                            {% else %}
+                            <p class="text-sm text-gray-600 mb-4">This visitor is not on the blacklist. Add them to block check-in and access.</p>
+                            <div class="flex flex-wrap gap-2">
+                                <button type="button" class="btn-add-blacklist-detail inline-flex items-center px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-medium" data-visitor-id="{{ visitor.id|e }}">
+                                    <i class="fas fa-ban mr-2"></i>Add to blacklist
+                                </button>
+                                <a href="{{ url_for('blacklist_page') }}" class="inline-flex items-center px-4 py-2 bg-gray-100 text-gray-800 rounded-lg hover:bg-gray-200 text-sm font-medium">
+                                    <i class="fas fa-list mr-2"></i>View blacklist
+                                </a>
+                            </div>
+                            {% endif %}
                         </div>
 
                         <!-- Quick Actions -->
@@ -5279,6 +5593,28 @@ def visitor_detail(visitor_id):
                         <p class="text-sm mt-2">This visitor hasn't completed any visits yet.</p>
                     </div>
                     {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <div id="detail-reason-modal" class="detail-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-reason-title">
+            <div class="detail-modal-box">
+                <h3 id="detail-reason-title">Blacklist reason</h3>
+                <textarea id="detail-reason-input" placeholder="Enter reason..." aria-label="Blacklist reason"></textarea>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="detail-reason-cancel">Cancel</button>
+                    <button type="button" class="btn-primary" id="detail-reason-save">Save</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="detail-remove-confirm-modal" class="detail-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="detail-remove-confirm-title">
+            <div class="detail-modal-box">
+                <h3 id="detail-remove-confirm-title">Remove from blacklist?</h3>
+                <p class="text-sm text-gray-600 mt-1">This visitor will be able to check in again.</p>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="detail-remove-confirm-cancel">Cancel</button>
+                    <button type="button" class="btn-danger" id="detail-remove-confirm-yes">Remove from blacklist</button>
                 </div>
             </div>
         </div>
@@ -5587,10 +5923,10 @@ def visitor_registration():
 # --------------------------
 @app.route('/rooms')
 def rooms_list():
-    """List meeting rooms with add/edit/delete."""
+    """List meeting rooms with add/edit/delete and status (Available/Occupied)."""
     rooms = get_meeting_rooms()
-    # Normalize to list of (id, data) for template
     rooms_list_data = [{'id': rid, **data} for rid, data in rooms.items()]
+    occupied_room_ids = _get_occupied_room_ids()
     ROOMS_HTML = """
     <!DOCTYPE html>
     <html lang="en">
@@ -5602,8 +5938,8 @@ def rooms_list():
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     </head>
     <body class="bg-gray-50 min-h-screen">
-        <div class="max-w-5xl mx-auto p-6">
-            <div class="flex justify-between items-center mb-6">
+        <div class="max-w-6xl mx-auto p-6">
+            <div class="flex flex-wrap justify-between items-start gap-4 mb-6">
                 <div>
                     <a href="/" class="text-blue-600 hover:underline text-sm mb-2 inline-block"><i class="fas fa-arrow-left mr-1"></i>Back to Admin</a>
                     <h1 class="text-2xl font-bold text-gray-900">Meeting Rooms</h1>
@@ -5613,38 +5949,35 @@ def rooms_list():
                     <i class="fas fa-plus mr-2"></i>Add Room
                 </button>
             </div>
-            <div class="bg-white rounded-xl shadow overflow-hidden">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Capacity</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Floor</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amenities</th>
-                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="roomsTableBody" class="divide-y divide-gray-200">
-                        {% for r in rooms_list_data %}
-                        <tr class="hover:bg-gray-50">
-                            <td class="px-6 py-4 text-sm font-medium text-gray-900">{{ r.name }}</td>
-                            <td class="px-6 py-4 text-sm text-gray-600">{{ r.capacity }}</td>
-                            <td class="px-6 py-4 text-sm text-gray-600">{{ r.floor }}</td>
-                            <td class="px-6 py-4 text-sm text-gray-500">{{ r.amenities or '-' }}</td>
-                            <td class="px-6 py-4 text-right">
-                                <button type="button" class="text-blue-600 hover:underline mr-3" data-action="edit" data-id="{{ r.id }}" data-name="{{ r.name|e }}" data-capacity="{{ r.capacity }}" data-floor="{{ (r.floor or '')|e }}" data-amenities="{{ (r.amenities or '')|e }}">Edit</button>
-                                <button type="button" class="text-red-600 hover:underline" data-action="delete" data-id="{{ r.id }}" data-name="{{ r.name|e }}">Delete</button>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-                {% if not rooms_list_data %}
-                <p class="p-6 text-gray-500 text-center">No rooms yet. Click "Add Room" to create one.</p>
-                {% endif %}
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" id="roomsCardContainer">
+                {% for r in rooms_list_data %}
+                <div class="bg-white rounded-xl shadow border border-gray-100 overflow-hidden flex flex-col">
+                    <div class="p-4 flex-1">
+                        <div class="flex justify-between items-start gap-2 mb-2">
+                            <h3 class="text-lg font-semibold text-gray-900 truncate">{{ r.name }}</h3>
+                            <span class="room-status-badge shrink-0 px-2 py-0.5 rounded-full text-xs font-medium
+                                {% if r.id in occupied_room_ids %}bg-red-100 text-red-800{% else %}bg-green-100 text-green-800{% endif %}">
+                                {% if r.id in occupied_room_ids %}Occupied{% else %}Available{% endif %}
+                            </span>
+                        </div>
+                        <dl class="space-y-1 text-sm text-gray-600">
+                            <div><span class="text-gray-500">Capacity</span> {{ r.capacity or '-' }}</div>
+                            <div><span class="text-gray-500">Floor</span> {{ r.floor or '-' }}</div>
+                            <div><span class="text-gray-500">Amenities</span> {{ (r.amenities or '-')[:50] }}{% if (r.amenities or '')|length > 50 %}...{% endif %}</div>
+                        </dl>
+                    </div>
+                    <div class="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-wrap gap-2">
+                        <button type="button" class="text-blue-600 hover:underline text-sm" data-action="edit" data-id="{{ r.id }}" data-name="{{ r.name|e }}" data-capacity="{{ r.capacity }}" data-floor="{{ (r.floor or '')|e }}" data-amenities="{{ (r.amenities or '')|e }}">Edit</button>
+                        <button type="button" class="text-red-600 hover:underline text-sm" data-action="delete" data-id="{{ r.id }}" data-name="{{ r.name|e }}">Delete</button>
+                    </div>
+                </div>
+                {% endfor %}
             </div>
+            {% if not rooms_list_data %}
+            <p class="p-6 text-gray-500 text-center bg-white rounded-xl shadow">No rooms yet. Click "Add Room" to create one.</p>
+            {% endif %}
         </div>
-        <!-- Add/Edit Modal -->
+        <!-- Add/Edit Room Modal -->
         <div id="roomModal" class="fixed inset-0 bg-black/50 items-center justify-center z-50" style="display: none;">
             <div class="bg-white rounded-xl shadow-xl max-w-md w-full mx-4 p-6">
                 <h2 id="modalTitle" class="text-lg font-semibold mb-4">Add Room</h2>
@@ -5721,21 +6054,25 @@ def rooms_list():
                     .catch(function() { alert('Failed to delete'); });
             }
             document.addEventListener('DOMContentLoaded', function() {
-                document.getElementById('roomsTableBody').addEventListener('click', function(ev) {
-                    var btn = ev.target.closest('button[data-action]');
-                    if (!btn) return;
-                    if (btn.getAttribute('data-action') === 'edit') {
-                        openEditModal(btn.getAttribute('data-id'), btn.getAttribute('data-name'), btn.getAttribute('data-capacity'), btn.getAttribute('data-floor') || '', btn.getAttribute('data-amenities') || '');
-                    } else if (btn.getAttribute('data-action') === 'delete') {
-                        deleteRoom(btn.getAttribute('data-id'), btn.getAttribute('data-name'));
-                    }
-                });
+                var container = document.getElementById('roomsCardContainer');
+                if (container) {
+                    container.addEventListener('click', function(ev) {
+                        var btn = ev.target.closest('button[data-action]');
+                        if (!btn) return;
+                        var action = btn.getAttribute('data-action');
+                        if (action === 'edit') {
+                            openEditModal(btn.getAttribute('data-id'), btn.getAttribute('data-name'), btn.getAttribute('data-capacity'), btn.getAttribute('data-floor') || '', btn.getAttribute('data-amenities') || '');
+                        } else if (action === 'delete') {
+                            deleteRoom(btn.getAttribute('data-id'), btn.getAttribute('data-name'));
+                        }
+                    });
+                }
             });
         </script>
     </body>
     </html>
     """
-    return render_template_string(ROOMS_HTML, rooms_list_data=rooms_list_data)
+    return render_template_string(ROOMS_HTML, rooms_list_data=rooms_list_data, occupied_room_ids=occupied_room_ids)
 
 @app.route('/api/rooms', methods=['POST'])
 def api_rooms_create():
@@ -5772,6 +6109,7 @@ def api_rooms_list():
     """Return all meeting rooms (for Register_App or other consumers)."""
     rooms = get_meeting_rooms()
     return jsonify(dict(rooms))
+
 
 @app.route('/api/notify_host_time_exceeded', methods=['POST'])
 def api_notify_host_time_exceeded():
@@ -5910,6 +6248,12 @@ def employees_list():
     # Get unique departments
     departments = list(set(emp.get('department', 'Not Specified') for emp in all_employees.values()))
     
+    # Safe JSON for embedding in HTML (prevents </script> in data from breaking the page)
+    def _script_safe_json(obj):
+        return json.dumps(obj, default=str).replace('<', '\\u003c')
+    employees_json_safe = _script_safe_json(all_employees)
+    analytics_json_safe = _script_safe_json(employee_analytics)
+    
     EMP_HTML = """
     <!DOCTYPE html>
     <html lang="en">
@@ -5929,7 +6273,12 @@ def employees_list():
                 box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
             }
             .status-badge {
-                @apply px-2 py-1 rounded-full text-xs font-semibold;
+                display: inline-flex;
+                align-items: center;
+                padding: 2px 8px;
+                border-radius: 9999px;
+                font-size: 0.75rem;
+                font-weight: 600;
             }
         </style>
     </head>
@@ -6022,7 +6371,7 @@ def employees_list():
                                     class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
                                 <option value="all">All Departments</option>
                                 {% for dept in departments %}
-                                <option value="{{ dept }}">{{ dept }}</option>
+                                <option value="{{ dept|lower }}">{{ dept }}</option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -6044,7 +6393,7 @@ def employees_list():
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
                             {% for emp_id, emp in employees.items() %}
-                            <tr class="hover:bg-gray-50 transition-colors employee-row" data-dept="{{ emp.department|lower if emp.department else '' }}">
+                            <tr class="hover:bg-gray-50 transition-colors employee-row" data-dept="{{ (emp.department|default('Not Specified'))|lower|e }}" data-search="{{ ((emp.name|default('')) ~ ' ' ~ (emp.email|default('')) ~ ' ' ~ (emp.department|default('')) ~ ' ' ~ (emp.role|default('')) ~ ' ' ~ (emp.position|default('')) ~ ' ' ~ (emp.contact|default('')) ~ ' ' ~ (emp.phone|default('')))|lower|e }}">
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     <div class="flex items-center">
                                         <div class="flex-shrink-0 h-10 w-10 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center text-white font-bold">
@@ -6097,19 +6446,19 @@ def employees_list():
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                     <div class="flex space-x-2">
-                                        <button onclick="editEmployee('{{ emp_id }}')" 
+                                        <button type="button" onclick="editEmployee(this.getAttribute('data-emp-id'))" data-emp-id="{{ emp_id|e }}" 
                                                 class="text-blue-600 hover:text-blue-900 transition-colors" 
                                                 title="Edit Employee">
                                             <i class="fas fa-edit"></i>
                                         </button>
                                         
-                                        <button onclick="viewEmployeeVisitors('{{ emp_id }}')" 
+                                        <button type="button" onclick="viewEmployeeVisitors(this.getAttribute('data-emp-id'))" data-emp-id="{{ emp_id|e }}" 
                                                 class="text-green-600 hover:text-green-900 transition-colors" 
                                                 title="View Visitor Details">
                                             <i class="fas fa-eye"></i>
                                         </button>
                                         
-                                        <button onclick="deleteEmployee('{{ emp_id }}')" 
+                                        <button type="button" onclick="deleteEmployee(this.getAttribute('data-emp-id'))" data-emp-id="{{ emp_id|e }}" 
                                                 class="text-red-600 hover:text-red-900 transition-colors" 
                                                 title="Delete Employee">
                                             <i class="fas fa-trash"></i>
@@ -6134,6 +6483,94 @@ def employees_list():
             </div>
             {% endif %}
         </div>
+
+        <!-- Filter and actions script: no template vars so it never breaks; defines all button handlers -->
+        <script>
+        (function() {
+            function filterEmployees() {
+                var searchEl = document.getElementById('searchInput');
+                var deptEl = document.getElementById('deptFilter');
+                if (!searchEl || !deptEl) return;
+                var search = (searchEl.value || '').trim().toLowerCase();
+                var dept = (deptEl.value || '').trim().toLowerCase();
+                var rows = document.querySelectorAll('tbody tr.employee-row');
+                for (var i = 0; i < rows.length; i++) {
+                    var row = rows[i];
+                    var searchableText = (row.getAttribute('data-search') || '').toLowerCase();
+                    var rowDept = (row.getAttribute('data-dept') || '').toLowerCase();
+                    var show = true;
+                    if (search && searchableText.indexOf(search) === -1) show = false;
+                    if (dept && dept !== 'all' && rowDept !== dept) show = false;
+                    row.style.display = show ? 'table-row' : 'none';
+                }
+            }
+            function openAddModal() {
+                var m = document.getElementById('employeeModal');
+                if (!m) return;
+                var t = document.getElementById('modalTitle');
+                if (t) t.innerText = 'Add Employee';
+                var id = document.getElementById('empId');
+                if (id) id.value = '';
+                var name = document.getElementById('empName');
+                if (name) name.value = '';
+                var email = document.getElementById('empEmail');
+                if (email) email.value = '';
+                var dept = document.getElementById('empDept');
+                if (dept) dept.value = '';
+                var role = document.getElementById('empRole');
+                if (role) role.value = '';
+                var contact = document.getElementById('empContact');
+                if (contact) contact.value = '';
+                m.classList.remove('hidden');
+            }
+            function closeModal() {
+                var m = document.getElementById('employeeModal');
+                if (m) m.classList.add('hidden');
+            }
+            function editEmployee(empId) {
+                if (!empId) return;
+                fetch('/get_employee/' + encodeURIComponent(empId))
+                    .then(function(res) { if (!res.ok) throw new Error('Failed to load'); return res.json(); })
+                    .then(function(data) {
+                        var t = document.getElementById('modalTitle');
+                        if (t) t.innerText = 'Edit Employee';
+                        var id = document.getElementById('empId');
+                        if (id) id.value = empId;
+                        var name = document.getElementById('empName');
+                        if (name) name.value = data.name || '';
+                        var email = document.getElementById('empEmail');
+                        if (email) email.value = data.email || '';
+                        var dept = document.getElementById('empDept');
+                        if (dept) dept.value = data.department || '';
+                        var role = document.getElementById('empRole');
+                        if (role) role.value = data.role || data.position || '';
+                        var contact = document.getElementById('empContact');
+                        if (contact) contact.value = data.contact || data.phone || '';
+                        var m = document.getElementById('employeeModal');
+                        if (m) m.classList.remove('hidden');
+                    })
+                    .catch(function() { alert('Error loading employee details'); });
+            }
+            function viewEmployeeVisitors(empId) {
+                if (!empId) return;
+                window.open('/employee/visitors/' + encodeURIComponent(empId), '_blank');
+            }
+            function deleteEmployee(empId) {
+                if (!empId) return;
+                if (confirm('Are you sure you want to delete this employee?')) {
+                    fetch('/delete_employee/' + encodeURIComponent(empId), { method: 'POST' })
+                        .then(function(res) { res.ok ? location.reload() : alert('Error deleting employee'); })
+                        .catch(function() { alert('Error deleting employee'); });
+                }
+            }
+            window.filterEmployees = filterEmployees;
+            window.openAddModal = openAddModal;
+            window.closeModal = closeModal;
+            window.editEmployee = editEmployee;
+            window.viewEmployeeVisitors = viewEmployeeVisitors;
+            window.deleteEmployee = deleteEmployee;
+        })();
+        </script>
 
         <!-- Add/Edit Modal -->
         <div id="employeeModal" class="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 hidden z-50">
@@ -6182,6 +6619,8 @@ def employees_list():
             </div>
         </div>
 
+        <script type="application/json" id="employees-json">{{ employees_json_safe|safe }}</script>
+        <script type="application/json" id="analytics-json">{{ analytics_json_safe|safe }}</script>
         <script>
             function openAddModal() {
                 document.getElementById('modalTitle').innerText = "Add Employee";
@@ -6198,26 +6637,10 @@ def employees_list():
                 document.getElementById('employeeModal').classList.add('hidden');
             }
 
-            function filterEmployees() {
-                const search = document.getElementById('searchInput').value.toLowerCase();
-                const dept = document.getElementById('deptFilter').value.toLowerCase();
-                const rows = document.querySelectorAll('.employee-row');
-
-                rows.forEach(row => {
-                    const name = row.querySelector('td:first-child').innerText.toLowerCase();
-                    const rowDept = row.getAttribute('data-dept');
-                    let show = true;
-
-                    if (search && !name.includes(search)) show = false;
-                    if (dept !== 'all' && rowDept !== dept) show = false;
-
-                    row.style.display = show ? '' : 'none';
-                });
-            }
-
             function editEmployee(empId) {
-                fetch(`/get_employee/${empId}`)
-                    .then(res => res.json())
+                if (!empId) return;
+                fetch('/get_employee/' + encodeURIComponent(empId))
+                    .then(res => { if (!res.ok) throw new Error('Failed to load'); return res.json(); })
                     .then(data => {
                         document.getElementById('modalTitle').innerText = "Edit Employee";
                         document.getElementById('empId').value = empId;
@@ -6227,52 +6650,57 @@ def employees_list():
                         document.getElementById('empRole').value = data.role || '';
                         document.getElementById('empContact').value = data.contact || '';
                         document.getElementById('employeeModal').classList.remove('hidden');
-                    });
+                    })
+                    .catch(() => alert('Error loading employee details'));
             }
 
             function viewEmployeeVisitors(empId) {
-                window.open(`/employee/visitors/${empId}`, '_blank');
+                if (!empId) return;
+                window.open('/employee/visitors/' + encodeURIComponent(empId), '_blank');
             }
 
-            document.getElementById('employeeForm').addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const empId = document.getElementById('empId').value;
-                const payload = {
-                    name: document.getElementById('empName').value,
-                    email: document.getElementById('empEmail').value,
-                    department: document.getElementById('empDept').value,
-                    role: document.getElementById('empRole').value,
-                    contact: document.getElementById('empContact').value
-                };
-
-                const url = empId ? `/edit_employee/${empId}` : '/add_employee';
-                const method = 'POST';
-                const res = await fetch(url, {
-                    method,
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload)
+            var employeeForm = document.getElementById('employeeForm');
+            if (employeeForm) {
+                employeeForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    var empId = document.getElementById('empId').value;
+                    var payload = {
+                        name: document.getElementById('empName').value,
+                        email: document.getElementById('empEmail').value,
+                        department: document.getElementById('empDept').value,
+                        role: document.getElementById('empRole').value,
+                        contact: document.getElementById('empContact').value
+                    };
+                    var url = empId ? '/edit_employee/' + encodeURIComponent(empId) : '/add_employee';
+                    try {
+                        var res = await fetch(url, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(payload)
+                        });
+                        if (res.ok) location.reload();
+                        else alert("Error saving employee");
+                    } catch (err) { alert("Error saving employee"); }
                 });
-
-                if (res.ok) { 
-                    location.reload(); 
-                } else { 
-                    alert("Error saving employee"); 
-                }
-            });
+            }
 
             function deleteEmployee(empId) {
-                if(confirm("Are you sure you want to delete this employee?")) {
-                    fetch(`/delete_employee/${empId}`, { method: 'POST' })
-                        .then(res => res.ok ? location.reload() : alert("Error deleting employee"));
+                if (!empId) return;
+                if (confirm("Are you sure you want to delete this employee?")) {
+                    fetch('/delete_employee/' + encodeURIComponent(empId), { method: 'POST' })
+                        .then(res => res.ok ? location.reload() : alert("Error deleting employee"))
+                        .catch(() => alert("Error deleting employee"));
                 }
             }
 
             function exportToCSV() {
-                const headers = ['Name', 'Email', 'Department', 'Role', 'Contact', 'Visitor Count'];
-                const rows = {{ employees|tojson }};
-                const analytics = {{ employee_analytics|tojson }};
-                
-                let csvContent = headers.join(',') + '\n';
+                var headers = ['Name', 'Email', 'Department', 'Role', 'Contact', 'Visitor Count'];
+                var rowsEl = document.getElementById('employees-json');
+                var analyticsEl = document.getElementById('analytics-json');
+                var rows = rowsEl ? JSON.parse(rowsEl.textContent || '{}') : {};
+                var analytics = analyticsEl ? JSON.parse(analyticsEl.textContent || '{}') : {};
+
+                var csvContent = headers.join(',') + '\n';
                 
                 Object.entries(rows).forEach(([empId, emp]) => {
                     const visitorCount = analytics[empId] ? analytics[empId].visitor_count : 0;
@@ -6307,6 +6735,8 @@ def employees_list():
     return render_template_string(EMP_HTML, 
                                 employees=all_employees,
                                 employee_analytics=employee_analytics,
+                                employees_json_safe=employees_json_safe,
+                                analytics_json_safe=analytics_json_safe,
                                 total_visitors=total_visitors,
                                 avg_visitors_per_employee=avg_visitors_per_employee,
                                 top_employee_name=top_employee_name,
@@ -6439,7 +6869,14 @@ def get_employee(emp_id):
     emp_data = db.reference(f'employees/{emp_id}').get()
     if not emp_data:
         return jsonify({"error": "Employee not found"}), 404
-    return jsonify(emp_data)
+    # Normalize to form fields (role/contact) so edit modal works like mock branch
+    return jsonify({
+        'name': emp_data.get('name', ''),
+        'email': emp_data.get('email', ''),
+        'department': emp_data.get('department', ''),
+        'role': emp_data.get('role', emp_data.get('position', '')),
+        'contact': emp_data.get('contact', emp_data.get('phone', ''))
+    })
 
 @app.route('/add_employee', methods=['POST'])
 def add_employee():
@@ -6464,9 +6901,9 @@ def delete_employee(emp_id):
 
 if __name__ == "__main__":
     print("\n" + "="*50)
-    print("🚀 Starting Admin Dashboard...")
+    print("Starting Admin Dashboard...")
     print("="*50)
-    print("📊 Dashboard URL: http://localhost:5000")
-    print("💡 Using mock data (no Firebase required)")
+    print("Dashboard URL: http://localhost:5000")
+    print("Using mock data (no Firebase required)")
     print("="*50 + "\n")
     app.run(host='0.0.0.0', port=5000, debug=True)

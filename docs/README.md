@@ -9,6 +9,7 @@ Start here for all project documentation.
 | [PROJECT_STATUS_AND_RUNBOOKS.md](PROJECT_STATUS_AND_RUNBOOKS.md) | Status and runbooks |
 | [FEATURES_CHECKLIST.md](FEATURES_CHECKLIST.md) | Features checklist |
 | [TESTING_GUIDE.md](TESTING_GUIDE.md) | **Primary testing guide** — setup and full test flow |
+| [ADMIN_DASHBOARD_TESTING.md](ADMIN_DASHBOARD_TESTING.md) | **Admin dashboard** — full functionality test checklist |
 | [QUICK_TEST_CHECKLIST.md](QUICK_TEST_CHECKLIST.md) | Short test checklist |
 | [TESTING_CHECKLIST.md](TESTING_CHECKLIST.md) | Detailed testing checklist |
 | [TESTING_STRATEGY.md](TESTING_STRATEGY.md) | Testing strategy |

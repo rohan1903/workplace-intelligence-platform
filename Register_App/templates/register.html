@@ -8,11 +8,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #4361ee;
-            --primary-dark: #3a0ca3;
-            --primary-light: #4895ef;
-            --secondary: #f72585;
-            --accent: #4cc9f0;
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --primary-light: #3b82f6;
+            --secondary: #64748b;
+            --accent: #64748b;
             --success: #38b000;
             --light: #f8f9fa;
             --dark: #212529;
@@ -161,7 +161,7 @@
         input[type="text"]:focus, input[type="email"]:focus, input[type="date"]:focus, select:focus {
             outline: none;
             border-color: var(--primary-light);
-            box-shadow: 0 0 0 3px rgba(72, 149, 239, 0.2);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
         }
 
         input.error, select.error {
@@ -182,6 +182,10 @@
             color: var(--gray);
             font-size: 18px;
             pointer-events: none;
+        }
+
+        #employee-selection-wrapper .input-icon {
+            color: #2563eb;
         }
         
         .input-wrapper .fa-check-circle, .input-wrapper .fa-times-circle {
@@ -236,7 +240,7 @@
             justify-content: center;
             width: 100%;
             margin-top: auto;
-            box-shadow: 0 4px 15px rgba(67, 97, 238, 0.3);
+            box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
             position: relative;
             overflow: hidden;
         }
