@@ -57,11 +57,12 @@ htmlcov/
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# Upload directories (test images - optional, uncomment if you want to exclude)
-# uploads/
-# **/uploads/
-# uploads_reg/
-# **/uploads_reg/
+# Upload directories (user photos, test images)
+uploads/
+**/uploads/
+uploads_reg/
+**/uploads_reg/
+Register_App/debug_frames/
 
 # Large model files (excluded due to GitHub size limits)
 *.pkl

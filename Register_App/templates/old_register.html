@@ -354,13 +354,13 @@
                 <label>Purpose of Visit</label>
                 <div class="input-wrapper">
                     <label><input type="radio" name="purpose_type" value="employee" required> To meet an employee</label>
-                    <label><input type="radio" name="purpose_type" value="other" required> Other</label>
+                    <label><input type="radio" name="purpose_type" value="other" required checked> Other</label>
                 </div>
             </div>
 
             <!-- Employee Dropdown -->
             <div class="form-group" id="employeeSelectGroup" style="display: none;">
-                <label for="employee_name">Select Employee</label>
+                <label for="employee_name">Select Employee <span class="text-red-500">*</span></label>
                 <select id="employee_name" name="employee_name" class="form-control">
                     <option value="" disabled selected>Select an employee</option>
                     {% for emp_id, emp in employees.items() %}
@@ -370,9 +370,9 @@
             </div>
 
             <!-- Other Purpose Textbox -->
-            <div class="form-group" id="otherPurposeGroup" style="display: none;">
-                <label for="other_purpose">Specify Purpose</label>
-                <input type="text" id="other_purpose" name="other_purpose" class="form-control" placeholder="Enter your purpose">
+            <div class="form-group" id="otherPurposeGroup">
+                <label for="other_purpose">Specify Purpose <span class="text-red-500">*</span></label>
+                <input type="text" id="other_purpose" name="other_purpose" class="form-control" placeholder="e.g. Interview, delivery, event" value="">
             </div>
 
             <!-- Visit Date -->
@@ -415,32 +415,58 @@
         const purposeRadios = document.getElementsByName('purpose_type');
         const empGroup = document.getElementById('employeeSelectGroup');
         const otherGroup = document.getElementById('otherPurposeGroup');
+        const empSelect = document.getElementById('employee_name');
+        const otherInput = document.getElementById('other_purpose');
+
+        function togglePurposeFields() {
+            const isEmployee = document.querySelector('input[name="purpose_type"]:checked')?.value === 'employee';
+            if (isEmployee) {
+                empGroup.style.display = 'block';
+                otherGroup.style.display = 'none';
+                otherInput.removeAttribute('required');
+                empSelect.setAttribute('required', 'required');
+            } else {
+                empGroup.style.display = 'none';
+                otherGroup.style.display = 'block';
+                empSelect.removeAttribute('required');
+                otherInput.setAttribute('required', 'required');
+            }
+        }
 
         purposeRadios.forEach(radio => {
-            radio.addEventListener('change', () => {
-                if (radio.value === 'employee' && radio.checked) {
-                    empGroup.style.display = 'block';
-                    otherGroup.style.display = 'none';
-                } else if (radio.value === 'other' && radio.checked) {
-                    empGroup.style.display = 'none';
-                    otherGroup.style.display = 'block';
-                }
-            });
+            radio.addEventListener('change', togglePurposeFields);
         });
+        togglePurposeFields(); // Initial state: "other" is checked by default
 
         // --- Submit form with spinner and messages ---
         document.getElementById("oldForm").addEventListener("submit", async function(e) {
             e.preventDefault();
-            
+
             const submitBtn = document.getElementById("submitBtn");
             const spinner = document.getElementById("spinner");
             const statusMessage = document.getElementById("status-message");
             const messageText = document.getElementById("message-text");
-            
+            const purposeType = document.querySelector('input[name="purpose_type"]:checked')?.value;
+            const empSelect = document.getElementById('employee_name');
+            const otherInput = document.getElementById('other_purpose');
+
+            if (purposeType === 'employee' && (!empSelect.value || empSelect.value === '')) {
+                messageText.textContent = 'Please select an employee to meet.';
+                statusMessage.className = 'status-message status-error';
+                statusMessage.style.display = 'flex';
+                return;
+            }
+            if (purposeType === 'other' && (!otherInput.value || otherInput.value.trim().length < 2)) {
+                messageText.textContent = 'Please specify your purpose of visit (at least 2 characters).';
+                statusMessage.className = 'status-message status-error';
+                statusMessage.style.display = 'flex';
+                return;
+            }
+
             submitBtn.disabled = true;
             spinner.style.display = 'block';
             statusMessage.style.display = 'none';
-            
+
             const formData = new FormData(this);
             const data = new URLSearchParams();
             for (const pair of formData.entries()) {

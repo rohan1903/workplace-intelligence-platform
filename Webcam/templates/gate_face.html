@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate - Face Verification</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .camera-container {
+            position: relative;
+            width: 100%;
+            max-width: 480px;
+            margin: auto;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 4/3;
+            background: #1a1a1a;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            border: 4px solid #0d6efd;
+            transition: box-shadow 0.3s ease, border-color 0.3s ease;
+        }
+        .camera-container.face-ok { border-color: #38b000; box-shadow: 0 0 0 4px rgba(56, 176, 0, 0.4); }
+        .camera-container.face-fail { border-color: #ef233c; box-shadow: 0 0 0 4px rgba(239, 35, 60, 0.4); }
+        #video-feed { width: 100%; height: 100%; object-fit: cover; display: block; transform: scaleX(-1); }
+        #message-box {
+            min-height: 80px; display: flex; align-items: center; justify-content: center;
+            font-weight: 600; font-size: 1.1rem; border-radius: 8px; padding: 16px 20px;
+            line-height: 1.5; text-align: center; min-width: 280px;
+        }
+        .message-success { background-color: #d1fae5; color: #065f46; border: 2px solid #34d399; }
+        .message-error { background-color: #fee2e2; color: #991b1b; border: 2px solid #f87171; }
+        .message-waiting { background-color: #eff6ff; color: #1e40af; border: 2px solid #60a5fa; }
+        .message-checkout { background-color: #fef3c7; color: #92400e; border: 2px solid #fbbf24; }
+        /* Face positioning guide - oval */
+        .face-guide {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 55%;
+            height: 70%;
+            border: 3px dashed rgba(255,255,255,0.6);
+            border-radius: 50%;
+            pointer-events: none;
+            box-sizing: border-box;
+        }
+        /* Scanning lines - blue vertical lines moving up/down */
+        @keyframes scanLine { 0% { top: 0; opacity: 0.8; } 50% { top: 95%; opacity: 1; } 100% { top: 0; opacity: 0.8; } }
+        .scanning-line {
+            position: absolute;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #0d6efd, transparent);
+            animation: scanLine 2.5s infinite ease-in-out;
+            box-shadow: 0 0 12px #0d6efd;
+            pointer-events: none;
+        }
+        .scanning-line:nth-child(2) { animation-delay: 0.5s; }
+        .scanning-line:nth-child(3) { animation-delay: 1s; }
+        .scanning-line:nth-child(4) { animation-delay: 1.5s; }
+        /* Face status indicator (like Register) */
+        .face-status {
+            margin-top: 12px;
+            padding: 14px 18px;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            transition: all 0.3s ease;
+            border: 2px solid #e9ecef;
+            max-width: 480px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .face-status.checking { background: rgba(37, 99, 235, 0.08); border-color: #2563eb; color: #1d4ed8; }
+        .face-status.detected { background: rgba(56, 176, 0, 0.12); border-color: #38b000; color: #38b000; }
+        .face-status.not-detected { background: rgba(239, 35, 60, 0.08); border-color: #ef233c; color: #ef233c; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="container mx-auto max-w-xl text-center">
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-2">
+            <span class="text-blue-600">Workplace Intelligence</span> Gate
+        </h1>
+        <p id="step-label" class="text-gray-600 mb-4 font-medium">Step 2: Face Verification</p>
+
+        <p class="text-gray-500 mb-3 text-sm">Position your face inside the oval — good lighting, face the camera</p>
+
+        <div id="message-box" class="message-waiting mb-4 transition duration-300 mx-auto">
+            Look at the camera to verify your face.
+        </div>
+
+        <div class="camera-container" id="video-container">
+            <video id="video-feed" autoplay playsinline muted></video>
+            <canvas id="photo-canvas" style="display: none;"></canvas>
+            <div class="face-guide" title="Position your face inside this oval"></div>
+            <div id="scanning-line-1" class="scanning-line"></div>
+            <div id="scanning-line-2" class="scanning-line"></div>
+            <div id="scanning-line-3" class="scanning-line"></div>
+        </div>
+
+        <div id="face-status" class="face-status checking">
+            <i class="fas fa-spinner fa-spin icon"></i>
+            <span id="face-status-text">Checking for face...</span>
+        </div>
+
+        <p class="text-xs text-gray-400 mt-4">
+            <a href="/checkin_gate" class="text-blue-600 underline hover:no-underline">← Back to scan QR</a>
+        </p>
+    </div>
+
+    <script>
+        const video = document.getElementById('video-feed');
+        const canvas = document.getElementById('photo-canvas');
+        const context = canvas.getContext('2d');
+        const messageBox = document.getElementById('message-box');
+        const stepLabel = document.getElementById('step-label');
+        const videoContainer = document.getElementById('video-container');
+        const faceStatusEl = document.getElementById('face-status');
+        const faceStatusText = document.getElementById('face-status-text');
+
+        const params = new URLSearchParams(window.location.search);
+        const action = params.get('action') || sessionStorage.getItem('gate_action') || 'checkin';
+        let qrData = sessionStorage.getItem('gate_qr_data');
+        let isProcessing = false;
+        let verifyIntervalId = null;
+        let faceCheckIntervalId = null;
+
+        if (!qrData) {
+            messageBox.className = 'message-error mb-4 mx-auto';
+            messageBox.innerHTML = 'No QR data. Please <a href="/checkin_gate" class="underline">scan your QR first</a>.';
+        } else {
+            stepLabel.textContent = action === 'checkin' ? 'Check In — Step 2: Face Verification' : 'Check Out — Step 2: Face Verification';
+        }
+
+        async function checkFaceLive() {
+            if (!qrData || !video.srcObject || video.videoWidth === 0) return;
+            const c = document.createElement('canvas');
+            c.width = video.videoWidth;
+            c.height = video.videoHeight;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(video, 0, 0, c.width, c.height);
+            const dataUrl = c.toDataURL('image/jpeg', 0.95);
+
+            faceStatusEl.className = 'face-status checking';
+            faceStatusText.textContent = 'Checking...';
+            faceStatusEl.querySelector('.icon').className = 'fas fa-spinner fa-spin icon';
+
+            try {
+                const res = await fetch('/api/check_face', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: dataUrl })
+                });
+                const data = await res.json();
+                if (data.face_detected) {
+                    faceStatusEl.className = 'face-status detected';
+                    faceStatusEl.querySelector('.icon').className = 'fas fa-check-circle icon';
+                    faceStatusText.textContent = 'Face detected ✓ Verifying identity...';
+                    videoContainer.classList.remove('face-fail');
+                    videoContainer.classList.add('face-ok');
+                } else {
+                    faceStatusEl.className = 'face-status not-detected';
+                    faceStatusEl.querySelector('.icon').className = 'fas fa-times-circle icon';
+                    faceStatusText.textContent = data.hint || data.error || 'No face detected. Position your face inside the oval.';
+                    videoContainer.classList.remove('face-ok');
+                    videoContainer.classList.add('face-fail');
+                }
+            } catch (err) {
+                faceStatusEl.className = 'face-status not-detected';
+                faceStatusEl.querySelector('.icon').className = 'fas fa-exclamation-triangle icon';
+                faceStatusText.textContent = 'Check failed. Ensure server is running.';
+                videoContainer.classList.remove('face-ok');
+                videoContainer.classList.add('face-fail');
+            }
+        }
+
+        async function setupCamera() {
+            if (!qrData) return;
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    startVerifyLoop();
+                    faceCheckIntervalId = setInterval(checkFaceLive, 2000);
+                    checkFaceLive();
+                };
+            } catch (err) {
+                console.error('Camera error:', err);
+                messageBox.className = 'message-error mb-4 mx-auto';
+                messageBox.innerHTML = '❌ Cannot access camera. Check permissions.';
+            }
+        }
+
+        function captureAndVerify() {
+            if (isProcessing || !qrData || video.videoWidth === 0) return;
+
+            isProcessing = true;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const payload = { image: canvas.toDataURL('image/jpeg', 0.95), qr_data: qrData, action: action };
+
+            fetch('/checkin_verify_and_log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            })
+            .then(r => r.json())
+            .then(data => {
+                isProcessing = false;
+                handleResponse(data);
+            })
+            .catch(err => {
+                isProcessing = false;
+                console.error('Network error:', err);
+                messageBox.className = 'message-error mb-4 mx-auto';
+                messageBox.innerHTML = '❌ Network Error. Cannot connect to server.';
+            });
+        }
+
+        function handleResponse(data) {
+            if (data.status === 'granted') {
+                sessionStorage.removeItem('gate_action');
+                sessionStorage.removeItem('gate_qr_data');
+                messageBox.className = 'message-success mb-4 mx-auto';
+                messageBox.innerHTML = `✅ ${data.message}`;
+                stopVerifyLoop();
+                if (faceCheckIntervalId) { clearInterval(faceCheckIntervalId); faceCheckIntervalId = null; }
+                setTimeout(() => { window.location.href = data.redirect_url; }, 1500);
+            }
+            else if (data.status === 'checked_out') {
+                sessionStorage.removeItem('gate_action');
+                sessionStorage.removeItem('gate_qr_data');
+                messageBox.className = 'message-checkout mb-4 mx-auto';
+                messageBox.innerHTML = `✅ ${data.message}`;
+                stopVerifyLoop();
+                if (faceCheckIntervalId) { clearInterval(faceCheckIntervalId); faceCheckIntervalId = null; }
+                setTimeout(() => {
+                    window.location.href = data.redirect_url || `/checkin_success?name=${encodeURIComponent(data.name)}&action=checked%20out`;
+                }, 1500);
+            }
+            else if (data.status === 'denied' || data.status === 'error') {
+                messageBox.className = 'message-error mb-4 mx-auto';
+                messageBox.innerHTML = data.message;
+                /* Do NOT redirect when face not recognized - user stays on page to try again */
+                /* Only redirect when server explicitly says to re-scan QR (e.g. QR invalid/expired) */
+                if (data.message && data.message.toLowerCase().includes('scan your qr code')) {
+                    sessionStorage.removeItem('gate_action');
+                    sessionStorage.removeItem('gate_qr_data');
+                    setTimeout(() => { window.location.href = '/checkin_gate'; }, 2000);
+                }
+            }
+            else if (data.status === 'waiting') {
+                messageBox.className = 'message-waiting mb-4 mx-auto';
+                messageBox.innerHTML = data.message;
+            }
+        }
+
+        function startVerifyLoop() {
+            if (verifyIntervalId) return;
+            verifyIntervalId = setInterval(captureAndVerify, 1500);
+        }
+        function stopVerifyLoop() {
+            if (verifyIntervalId) { clearInterval(verifyIntervalId); verifyIntervalId = null; }
+        }
+
+        if (qrData) window.onload = setupCamera;
+    </script>
+</body>
+</html>

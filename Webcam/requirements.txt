@@ -10,5 +10,5 @@ openai-whisper @ git+https://github.com/openai/whisper.git
 sounddevice
 soundfile
 torch
-insightface
+# insightface  # requires C++ Build Tools; not used in code
 onnxruntime

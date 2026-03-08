@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gate - Scan QR</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
+        .camera-container { width: 100%; max-width: 480px; margin: auto; position: relative; }
+        #video-feed { width: 100%; height: auto; border-radius: 12px; transform: scaleX(-1); box-shadow: 0 10px 30px rgba(0,0,0,0.2); border: 5px solid #0d6efd; }
+        #message-box {
+            min-height: 80px; display: flex; align-items: center; justify-content: center;
+            font-weight: 600; font-size: 1.1rem; border-radius: 8px; padding: 16px 20px;
+            line-height: 1.5; text-align: center; min-width: 280px;
+        }
+        .message-success { background-color: #d1fae5; color: #065f46; border: 2px solid #34d399; }
+        .message-error { background-color: #fee2e2; color: #991b1b; border: 2px solid #f87171; }
+        .message-waiting { background-color: #eff6ff; color: #1e40af; border: 2px solid #60a5fa; }
+        @keyframes scan { 0% { top: 0; } 50% { top: 95%; } 100% { top: 0; } }
+        .scanning-line {
+            position: absolute; left: 5%; width: 90%; height: 3px;
+            background: linear-gradient(90deg, transparent, #0d6efd, transparent);
+            animation: scan 3s infinite linear; box-shadow: 0 0 10px #0d6efd;
+        }
+        .qr-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 999px; font-size: 0.85rem; font-weight: 600; }
+        .qr-badge.waiting { background: #fef3c7; color: #92400e; }
+        .qr-badge.detected { background: #d1fae5; color: #065f46; }
+        .action-btn { padding: 24px 48px; font-size: 1.25rem; font-weight: 700; border-radius: 12px; cursor: pointer; border: 3px solid transparent; transition: all 0.2s; }
+        .action-btn:hover { transform: scale(1.02); }
+        .action-btn.checkin { background: #2563eb; color: white; border-color: #1d4ed8; }
+        .action-btn.checkout { background: #059669; color: white; border-color: #047857; }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="container mx-auto max-w-xl text-center">
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-2">
+            <span class="text-blue-600">Workplace Intelligence</span> Gate
+        </h1>
+        <p class="text-gray-500 mb-6 text-sm">Dual-authentication: QR Code + Face Recognition</p>
+
+        <div id="step-choose" class="mb-8">
+            <p class="text-gray-600 mb-6 font-medium">What would you like to do?</p>
+            <div class="flex flex-col sm:flex-row gap-4 justify-center">
+                <button class="action-btn checkin" onclick="selectAction('checkin')">Check In</button>
+                <button class="action-btn checkout" onclick="selectAction('checkout')">Check Out</button>
+            </div>
+        </div>
+
+        <div id="step-scan" class="hidden">
+            <p id="action-label" class="text-gray-600 mb-4 font-medium"></p>
+            <div class="mb-4 flex justify-center gap-3 flex-wrap">
+                <span id="qr-status" class="qr-badge waiting">
+                    <svg id="qr-icon-waiting" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v1m6 11h1m-15 0H4m12.364-6.364l.707-.707M6.343 6.343l-.707-.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+                    <svg id="qr-icon-ok" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                    <span id="qr-status-text">Waiting for QR scan…</span>
+                </span>
+                <button id="btn-clear-qr" class="hidden text-xs text-red-500 underline hover:text-red-700" onclick="clearQR()">Clear QR</button>
+                <button class="text-xs text-gray-500 underline hover:text-gray-700" onclick="goBack()">← Back</button>
+            </div>
+            <div id="message-box" class="message-waiting mb-6 transition duration-300 mx-auto">
+                Scan your QR code with the camera.
+            </div>
+            <div class="camera-container">
+                <video id="video-feed" autoplay playsinline muted></video>
+                <canvas id="qr-canvas" style="display: none;"></canvas>
+                <div id="scanning-line" class="scanning-line"></div>
+            </div>
+        </div>
+
+        <p class="text-xs text-gray-400 mt-4">System is secured to Kiosk IP Address.</p>
+    </div>
+
+    <script>
+        const video = document.getElementById('video-feed');
+        const qrCanvas = document.getElementById('qr-canvas');
+        const qrContext = qrCanvas.getContext('2d');
+        const messageBox = document.getElementById('message-box');
+        const stepChoose = document.getElementById('step-choose');
+        const stepScan = document.getElementById('step-scan');
+        const actionLabel = document.getElementById('action-label');
+        const qrStatus = document.getElementById('qr-status');
+        const qrStatusText = document.getElementById('qr-status-text');
+        const qrIconWait = document.getElementById('qr-icon-waiting');
+        const qrIconOk = document.getElementById('qr-icon-ok');
+        const btnClearQr = document.getElementById('btn-clear-qr');
+
+        let selectedAction = null;
+        let scannedQrData = null;
+        let intervalId = null;
+
+        function selectAction(action) {
+            selectedAction = action;
+            stepChoose.classList.add('hidden');
+            stepScan.classList.remove('hidden');
+            actionLabel.textContent = action === 'checkin' ? 'Check In — Step 1: Scan QR' : 'Check Out — Step 1: Scan QR';
+            clearQR();
+            video.play().catch(() => {});
+            if (video.srcObject) startLoop();
+        }
+
+        function goBack() {
+            selectedAction = null;
+            stepScan.classList.add('hidden');
+            stepChoose.classList.remove('hidden');
+            stopLoop();
+        }
+
+        async function setupCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    if (selectedAction) startLoop();
+                };
+            } catch (err) {
+                console.error('Camera error:', err);
+                messageBox.className = 'message-error mb-6 mx-auto';
+                messageBox.innerHTML = '❌ Cannot access camera. Check permissions.';
+            }
+        }
+
+        function tryDetectQR() {
+            if (scannedQrData || video.videoWidth === 0) return;
+            const w = video.videoWidth, h = video.videoHeight;
+            if (w <= 0 || h <= 0) return;
+            qrCanvas.width = w;
+            qrCanvas.height = h;
+            qrContext.drawImage(video, 0, 0, w, h);
+            const imageData = qrContext.getImageData(0, 0, w, h);
+            const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+            if (code && code.data) {
+                try {
+                    const parsed = JSON.parse(code.data);
+                    if (parsed.v && parsed.i && parsed.k && parsed.e) {
+                        scannedQrData = code.data;
+                        onQrDetected();
+                    }
+                } catch (_) {}
+            }
+        }
+
+        function onQrDetected() {
+            stopLoop();
+            qrStatus.classList.remove('waiting');
+            qrStatus.classList.add('detected');
+            qrIconWait.classList.add('hidden');
+            qrIconOk.classList.remove('hidden');
+            qrStatusText.textContent = 'QR Detected ✓';
+            btnClearQr.classList.remove('hidden');
+            document.getElementById('scanning-line').classList.add('hidden');
+            messageBox.className = 'message-success mb-6 mx-auto';
+            messageBox.innerHTML = '✅ QR scanned! Redirecting to face verification…';
+            sessionStorage.setItem('gate_action', selectedAction);
+            sessionStorage.setItem('gate_qr_data', scannedQrData);
+            setTimeout(() => {
+                window.location.href = '/checkin_gate/face?action=' + selectedAction;
+            }, 800);
+        }
+
+        function clearQR() {
+            scannedQrData = null;
+            qrStatus.classList.remove('detected');
+            qrStatus.classList.add('waiting');
+            qrIconWait.classList.remove('hidden');
+            qrIconOk.classList.add('hidden');
+            qrStatusText.textContent = 'Waiting for QR scan…';
+            btnClearQr.classList.add('hidden');
+            const sl = document.getElementById('scanning-line');
+            if (sl) sl.classList.remove('hidden');
+            messageBox.className = 'message-waiting mb-6 mx-auto';
+            messageBox.innerHTML = 'Scan your QR code with the camera.';
+        }
+
+        function startLoop() {
+            if (intervalId) return;
+            intervalId = setInterval(tryDetectQR, 500);
+        }
+        function stopLoop() {
+            if (intervalId) { clearInterval(intervalId); intervalId = null; }
+        }
+
+        window.onload = setupCamera;
+    </script>
+</body>
+</html>

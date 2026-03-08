@@ -450,6 +450,51 @@
             margin-bottom: 10px;
             font-size: 1.1rem;
         }
+
+        /* Face detection live indicator */
+        .face-status {
+            margin-top: 12px;
+            padding: 14px 18px;
+            border-radius: var(--border-radius-sm);
+            font-weight: 600;
+            font-size: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: all 0.3s ease;
+            border: 2px solid var(--light-gray);
+        }
+        .face-status.detected {
+            background: rgba(56, 176, 0, 0.12);
+            border-color: var(--success);
+            color: var(--success);
+        }
+        .face-status.not-detected {
+            background: rgba(239, 35, 60, 0.08);
+            border-color: var(--error);
+            color: var(--error);
+        }
+        .face-status.checking {
+            background: rgba(37, 99, 235, 0.08);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+        .face-status .icon { font-size: 1.3rem; }
+        .video-container.face-ok { box-shadow: 0 0 0 4px var(--success); }
+        .video-container.face-fail { box-shadow: 0 0 0 4px var(--error); }
+        /* Face positioning guide - oval showing where to place face */
+        .face-guide {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 55%;
+            height: 70%;
+            border: 3px dashed rgba(255,255,255,0.6);
+            border-radius: 50%;
+            pointer-events: none;
+            box-sizing: border-box;
+        }
     </style>
 </head>
 <body>
@@ -549,12 +594,18 @@
                 <div class="section-title">
                     <i class="fas fa-camera"></i> Biometric Capture
                 </div>
-                <p class="camera-title">Face Capture Preview</p>
-                <div class="video-container">
+                <p class="camera-title">Position your face inside the oval — good lighting, face the camera</p>
+                <div class="video-container" id="video-container">
                     <video id="video" autoplay playsinline></video> 
+                    <canvas id="faceCheckCanvas" style="display:none;"></canvas>
+                    <div class="face-guide" title="Position your face inside this oval"></div>
                     <div id="camera-status" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.8); color: white; font-size: 1.1em;">
                         Waiting for camera access...
                     </div>
+                </div>
+                <div id="face-status" class="face-status checking">
+                    <i class="fas fa-spinner fa-spin icon"></i>
+                    <span id="face-status-text">Checking for face...</span>
                 </div>
                 <button class="btn" id="registerBtn" type="submit" form="regForm" disabled>
                     <i class="fas fa-user-plus"></i> Complete Registration
@@ -587,6 +638,81 @@
 
         // Store captured photo data
         let capturedPhotoData = null;
+        let faceDetected = false;
+        let faceCheckInterval = null;
+        let faceRequired = true;  // Will be updated from server
+
+        async function loadFaceRequired() {
+            try {
+                const r = await fetch("/api/face_required");
+                const d = await r.json();
+                faceRequired = d.face_required !== false;
+                if (!faceRequired) {
+                    document.getElementById("face-status").className = "face-status detected";
+                    document.getElementById("face-status").querySelector(".icon").className = "fas fa-info-circle icon";
+                    document.getElementById("face-status-text").textContent = "Face optional (QR mode). You can register now.";
+                    faceDetected = true;
+                }
+            } catch (_) {}
+        }
+
+        /**
+         * Capture current video frame and send to server for face detection check.
+         */
+        async function checkFace() {
+            if (!faceRequired) return;  // Skip when override is on
+            if (!video.srcObject || video.videoWidth === 0) return;
+            const canvas = document.getElementById("faceCheckCanvas");
+            const ctx = canvas.getContext("2d");
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            ctx.drawImage(video, 0, 0);
+            const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
+
+            const statusEl = document.getElementById("face-status");
+            const textEl = document.getElementById("face-status-text");
+            const container = document.getElementById("video-container");
+            statusEl.className = "face-status checking";
+            textEl.textContent = "Checking...";
+            statusEl.querySelector(".icon").className = "fas fa-spinner fa-spin icon";
+
+            try {
+                const res = await fetch("/api/check_face", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ image: dataUrl })
+                });
+                const data = await res.json();
+                faceDetected = data.face_detected === true;
+                if (faceDetected) {
+                    statusEl.className = "face-status detected";
+                    statusEl.querySelector(".icon").className = "fas fa-check-circle icon";
+                    textEl.textContent = "Face detected ✓ Ready to register";
+                    container.classList.remove("face-fail");
+                    container.classList.add("face-ok");
+                } else {
+                    statusEl.className = "face-status not-detected";
+                    statusEl.querySelector(".icon").className = "fas fa-times-circle icon";
+                    const msg = data.error || data.hint || "No face detected. Position your face inside the oval, ensure good lighting.";
+                    textEl.innerHTML = msg + ' <a href="/debug_detect" target="_blank" style="color:inherit;text-decoration:underline">Diagnose</a>';
+                    container.classList.remove("face-ok");
+                    container.classList.add("face-fail");
+                }
+            } catch (err) {
+                statusEl.className = "face-status not-detected";
+                statusEl.querySelector(".icon").className = "fas fa-exclamation-triangle icon";
+                textEl.textContent = "Check failed. Ensure server is running.";
+                container.classList.remove("face-ok");
+                container.classList.add("face-fail");
+                faceDetected = false;
+            }
+            updateRegisterButton();
+        }
+
+        function updateRegisterButton() {
+            const formValid = validateForm();
+            registerBtn.disabled = !(formValid && (faceDetected || !faceRequired));
+        }
 
         /**
          * Custom message box function to display errors, replacing alert().
@@ -611,9 +737,15 @@
         navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } })
             .then(stream => {
                 video.srcObject = stream;
-                video.addEventListener('loadedmetadata', () => {
+                video.addEventListener('loadedmetadata', async () => {
                     cameraStatus.style.display = 'none';
-                    registerBtn.disabled = !validateForm();
+                    await loadFaceRequired();
+                    updateRegisterButton();
+                    if (faceRequired) {
+                        if (faceCheckInterval) clearInterval(faceCheckInterval);
+                        faceCheckInterval = setInterval(checkFace, 2000);
+                        checkFace();
+                    }
                 });
             })
             .catch(err => {
@@ -636,16 +768,15 @@
                 const employees = await response.json();
                 populateEmployeeDropdown(employees);
 
-                // Enable register button if camera ready too
                 if (video.srcObject) {
-                    registerBtn.disabled = false;
+                    updateRegisterButton();
                 }
             } catch (error) {
                 console.error("Error fetching employees:", error);
                 employeeDropdown.innerHTML = '<option value="" disabled selected>Could not load employees</option>';
                 employeeDropdown.disabled = true;
                 showMessage("⚠️ Failed to load employee list. You can still register with 'Other' purpose.");
-                if (video.srcObject) registerBtn.disabled = !validateForm();
+                if (video.srcObject) updateRegisterButton();
             }
         }
 
@@ -859,10 +990,8 @@
         
         // This is the function that controls the button's overall state
         regForm.addEventListener('input', () => {
-            const formValid = validateForm();
-            if (video.srcObject) {
-                registerBtn.disabled = !formValid;
-            }
+            validateForm();
+            updateRegisterButton();
         });
 
         // Form submission handler
@@ -904,7 +1033,7 @@
                 canvas.height = video.videoHeight || 480;
                 const ctx = canvas.getContext("2d");
                 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                const photoBase64 = canvas.toDataURL("image/jpeg", 0.9);
+                const photoBase64 = canvas.toDataURL("image/jpeg", 0.95);
 
                 // Determine purpose type and values
                 let purposeType = "other";
@@ -945,11 +1074,9 @@
                 const result = await response.json();
 
                 if (result.success) {
-                    // Show success message
+                    if (faceCheckInterval) { clearInterval(faceCheckInterval); faceCheckInterval = null; }
                     document.getElementById('success-message').style.display = 'flex';
                     submitBtn.style.display = 'none';
-                    
-                    // Stop the camera stream
                     if (video.srcObject) {
                         const tracks = video.srcObject.getTracks();
                         tracks.forEach(track => track.stop());

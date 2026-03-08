@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 # --- Load environment ---
 load_dotenv()
 
+# Set OVERRIDE_FACE_REQUIRED=True in .env to allow registration without face (QR-only at gate)
+OVERRIDE_FACE_REQUIRED = os.environ.get("OVERRIDE_FACE_REQUIRED", "false").lower() in ("true", "1", "yes")
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "fallback_secret_key")
 VERIFICATION_THRESHOLD = 0.6
@@ -84,7 +87,7 @@ db_ref = db.reference() if db_app else None
 
 # --- YuNet (primary) + Dlib + OpenCV Haar fallback; no placeholder/mock ---
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-detector = predictor = face_recognizer = _cv_face_cascade = _yunet_detector = None
+detector = predictor = face_recognizer = _cv_face_cascade = _cv_face_alt2 = _yunet_detector = None
 _yunet_model_path = None
 if dlib:
     try:
@@ -96,6 +99,10 @@ if dlib:
         _cv_face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
+        try:
+            _cv_face_alt2 = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
+        except Exception:
+            _cv_face_alt2 = None
         _yunet_model_path = os.path.abspath(os.path.join(_script_dir, "..", "Webcam", "face_detection_yunet_2023mar.onnx"))
         if hasattr(cv2, "FaceDetectorYN") and os.path.isfile(_yunet_model_path):
             try:
@@ -125,13 +132,28 @@ def _embed_from_bbox(rgb_img, x, y, w, h):
     except Exception:
         return None
 
+def _to_dlib_format(img, rgb=True):
+    """Ensure image is uint8 contiguous for dlib (8-bit gray or RGB). Fixes NumPy 2.0 / dlib compatibility."""
+    if img is None:
+        return None
+    try:
+        out = np.ascontiguousarray(img.astype(np.uint8))
+        if out.ndim == 3 and rgb and out.shape[2] >= 3:
+            out = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+            out = np.ascontiguousarray(out)
+        return out
+    except Exception:
+        return None
+
+
 def _get_face_embedding_at_scale(cv2_img, min_side):
     """Run full detection pipeline at one scale. min_side=0 means no resize."""
     if cv2_img is None or cv2_img.size == 0:
         return None
-    bgr_img = np.ascontiguousarray(cv2_img)
-    rgb_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB))
-    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY))
+    cv2_img = np.ascontiguousarray(cv2_img.astype(np.uint8))
+    bgr_img = cv2_img
+    rgb_img = _to_dlib_format(cv2_img, rgb=True)
+    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY).astype(np.uint8))
     h, w = rgb_img.shape[:2]
     if min_side > 0 and min(h, w) < min_side:
         scale = min_side / min(h, w)
@@ -143,6 +165,18 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
     rgb_img = np.ascontiguousarray(rgb_img)
     gray_img = np.ascontiguousarray(gray_img)
     h, w = rgb_img.shape[:2]
+
+    # Try Haar first (often more forgiving for frontal faces in varied lighting)
+    for cascade in (_cv_face_cascade, _cv_face_alt2):
+        if cascade is None:
+            continue
+        for (sf, mn, ms) in [(1.25, 2, (15, 15)), (1.2, 2, (20, 20)), (1.15, 3, (15, 15)), (1.1, 2, (25, 25))]:
+            rects = cascade.detectMultiScale(gray_img, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+            if len(rects) > 0:
+                x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                out = _embed_from_bbox(rgb_img, x, y, rw, rh)
+                if out is not None:
+                    return out
 
     if _yunet_detector is not None:
         _yunet_detector.setInputSize((w, h))
@@ -173,12 +207,14 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
                     shape = predictor(rgb, face)
                     emb = face_recognizer.compute_face_descriptor(rgb, shape)
                     return np.array(emb)
-        if _cv_face_cascade is not None:
+        for cascade in (_cv_face_cascade, _cv_face_alt2):
+            if cascade is None:
+                continue
             for (sf, mn, ms) in [
-                (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
-                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)),
+                (1.3, 2, (10, 10)), (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
+                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)), (1.1, 2, (25, 25)),
             ]:
-                rects = _cv_face_cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+                rects = cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
                 if len(rects) > 0:
                     x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
                     dlib_rect = dlib.rectangle(int(x), int(y), int(x + rw), int(y + rh))
@@ -195,27 +231,37 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
     return try_detect(rgb_f, gray_f)
 
 def get_face_embedding(cv2_img):
-    """Try multiple scales and optionally downscale; YuNet + dlib + Haar. No placeholder."""
+    """Try multiple scales (downscale and upscale); YuNet + dlib + Haar. No placeholder."""
     if not predictor or not face_recognizer or cv2_img is None or cv2_img.size == 0:
         return None
     try:
         h, w = cv2_img.shape[:2]
         max_side = max(h, w)
-        # Large images: also try downscaled (detectors often work better at 480–640px)
         images_to_try = [cv2_img]
+        # Downscale for large images (detectors often work better at 480–640px)
         if max_side > 640:
             scale = 640.0 / max_side
-            new_w, new_h = int(w * scale), int(h * scale)
-            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            small = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             images_to_try.append(small)
         if max_side > 480:
             scale = 480.0 / max_side
-            new_w, new_h = int(w * scale), int(h * scale)
-            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            small = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             images_to_try.append(small)
+        # Upscale for small images (face may be too small to detect)
+        if max_side < 400:
+            scale = 480.0 / max_side
+            large = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(large)
+        # Histogram equalization can help in poor lighting
+        gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+        gray_eq = cv2.equalizeHist(gray)
+        gray_eq_bgr = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
+        images_to_try.append(gray_eq_bgr)
+        # Mirrored image (webcam often shows mirrored view; capture might differ)
+        images_to_try.append(cv2.flip(cv2_img, 1))
 
         for img in images_to_try:
-            for min_side in (0, 256, 320, 400, 512):
+            for min_side in (0, 256, 320, 400, 512, 200):
                 out = _get_face_embedding_at_scale(img, min_side)
                 if out is not None:
                     logger.info("Generated embedding (Register) - shape %s", out.shape)
@@ -556,6 +602,181 @@ def get_employees():
         logger.error(f"Error fetching employees: {e}")
         return jsonify([])
 
+@app.route('/api/debug_detect')
+def api_debug_detect():
+    """Run detection on last_no_face.jpg and report which detector finds a face. Helps diagnose why face isn't detected."""
+    debug_path = os.path.join(_script_dir, "debug_frames", "last_no_face.jpg")
+    if not os.path.isfile(debug_path):
+        return jsonify({"error": "No debug frame. Trigger 'No face detected' on registration page first."}), 404
+
+    cv2_img = cv2.imread(debug_path)
+    if cv2_img is None:
+        return jsonify({"error": "Could not load image"}), 500
+
+    h, w = cv2_img.shape[:2]
+    gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+    rgb = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
+
+    results = {"image_size": f"{w}x{h}", "haar": [], "yunet": [], "dlib": []}
+
+    # Test Haar
+    if _cv_face_cascade is not None:
+        for (sf, mn, ms) in [(1.2, 2, (15, 15)), (1.15, 3, (20, 20)), (1.1, 2, (25, 25))]:
+            rects = _cv_face_cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+            if len(rects) > 0:
+                results["haar"].append({"params": f"sf={sf} mn={mn} ms={ms}", "count": len(rects), "rects": rects.tolist()[:3]})
+        # Also try flipped
+        gray_f = cv2.flip(gray, 1)
+        rects = _cv_face_cascade.detectMultiScale(gray_f, scaleFactor=1.2, minNeighbors=2, minSize=(15, 15))
+        if len(rects) > 0 and not results["haar"]:
+            results["haar"].append({"params": "flipped", "count": len(rects)})
+
+    # Test YuNet
+    if _yunet_detector is not None:
+        _yunet_detector.setInputSize((w, h))
+        _, dets = _yunet_detector.detect(cv2_img)
+        if dets is not None and dets.shape[0] >= 1:
+            results["yunet"].append({"count": dets.shape[0], "first": dets[0].tolist()})
+        else:
+            cv2_f = cv2.flip(cv2_img, 1)
+            _, dets = _yunet_detector.detect(cv2_f)
+            if dets is not None and dets.shape[0] >= 1:
+                results["yunet"].append({"count": dets.shape[0], "flipped": True})
+
+    # Test dlib
+    if detector is not None:
+        for upsample in (0, 1, 2):
+            faces = detector(rgb, upsample)
+            if len(faces) > 0:
+                results["dlib"].append({"upsample": upsample, "count": len(faces)})
+                break
+        if not results["dlib"]:
+            rgb_f = cv2.flip(rgb, 1)
+            for upsample in (0, 1, 2):
+                faces = detector(rgb_f, upsample)
+                if len(faces) > 0:
+                    results["dlib"].append({"upsample": upsample, "count": len(faces), "flipped": True})
+                    break
+
+    emb = get_face_embedding(cv2_img)
+    results["final_embedding"] = emb is not None
+    return jsonify(results)
+
+
+@app.route('/debug_last_face')
+def debug_last_face():
+    """Serve the last frame that had no face detected (for debugging)."""
+    debug_path = os.path.join(_script_dir, "debug_frames", "last_no_face.jpg")
+    if not os.path.isfile(debug_path):
+        return "<p>No debug frame yet. Use the registration page and trigger 'No face detected' once.</p>", 404
+    return send_from_directory(os.path.dirname(debug_path), "last_no_face.jpg", mimetype="image/jpeg")
+
+
+@app.route('/debug_detect')
+def debug_detect_page():
+    """Page showing detection diagnostic + image. Visit after 'No face detected'."""
+    debug_path = os.path.join(_script_dir, "debug_frames", "last_no_face.jpg")
+    if not os.path.isfile(debug_path):
+        return "<p>No debug frame. Trigger 'No face detected' on registration page first.</p><p><a href='/register'>Go to Register</a></p>", 404
+    try:
+        cv2_img = cv2.imread(debug_path)
+        if cv2_img is None:
+            diag = {"error": "Could not load image"}
+        else:
+            cv2_img = np.ascontiguousarray(cv2_img.astype(np.uint8))
+            h, w = cv2_img.shape[:2]
+            gray = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY).astype(np.uint8))
+            rgb = _to_dlib_format(cv2_img, rgb=True)
+            diag = {"image_size": f"{w}x{h}"}
+            if _cv_face_cascade is not None:
+                r = _cv_face_cascade.detectMultiScale(gray, 1.2, 2, minSize=(15, 15))
+                diag["haar_default"] = len(r)
+            if _cv_face_alt2 is not None:
+                r = _cv_face_alt2.detectMultiScale(gray, 1.2, 2, minSize=(15, 15))
+                diag["haar_alt2"] = len(r)
+            if _yunet_detector is not None:
+                _yunet_detector.setInputSize((w, h))
+                _, d = _yunet_detector.detect(cv2_img)
+                diag["yunet"] = int(d.shape[0]) if d is not None else 0
+            if detector is not None and rgb is not None:
+                f = detector(rgb, 1)
+                diag["dlib"] = len(f)
+            try:
+                diag["embedding"] = get_face_embedding(cv2_img) is not None
+            except Exception as emb_err:
+                diag["embedding"] = False
+                diag["embedding_error"] = str(emb_err)
+    except Exception as e:
+        diag = {"error": str(e)}
+    return f"""
+    <html><head><title>Face Detection Debug</title></head><body style="font-family:sans-serif;padding:20px">
+    <h1>Face Detection Diagnostic</h1>
+    <p><img src="/debug_last_face" style="max-width:400px;border:2px solid #333"/></p>
+    <pre>{json.dumps(diag, indent=2)}</pre>
+    <p>haar_default/haar_alt2: faces found by Haar cascades. yunet: by YuNet. dlib: by dlib. embedding: final result.</p>
+    <p><a href="/register">Back to Register</a></p>
+    </body></html>
+    """
+
+
+@app.route('/api/face_required')
+def api_face_required():
+    """Returns whether face detection is required for registration."""
+    return jsonify({"face_required": not OVERRIDE_FACE_REQUIRED})
+
+
+@app.route('/api/face_debug')
+def api_face_debug():
+    """Diagnostic: face detection system status. Visit /api/face_debug to see if dlib/models are loaded."""
+    return jsonify({
+        "dlib_loaded": dlib is not None,
+        "predictor_loaded": predictor is not None,
+        "face_recognizer_loaded": face_recognizer is not None,
+        "haar_loaded": _cv_face_cascade is not None,
+        "yunet_loaded": _yunet_detector is not None,
+        "yunet_path": str(_yunet_model_path) if _yunet_model_path else None,
+        "yunet_exists": os.path.isfile(_yunet_model_path) if _yunet_model_path and isinstance(_yunet_model_path, str) else False,
+        "shape_path": os.path.join(_script_dir, "shape_predictor_68_face_landmarks.dat"),
+        "shape_exists": os.path.isfile(os.path.join(_script_dir, "shape_predictor_68_face_landmarks.dat")),
+        "face_model_exists": os.path.isfile(os.path.join(_script_dir, "dlib_face_recognition_resnet_model_v1.dat")),
+    })
+
+
+@app.route('/api/check_face', methods=['POST'])
+def api_check_face():
+    """Check if a face is detectable in the image. Used for live feedback during registration."""
+    try:
+        data = request.get_json() or {}
+        img_b64 = data.get("image")
+        if not img_b64 or "," not in str(img_b64):
+            return jsonify({"face_detected": False, "error": "No image"}), 400
+
+        photo_base64 = str(img_b64).split(",")[1]
+        np_img = np.frombuffer(base64.b64decode(photo_base64), np.uint8)
+        cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        if cv2_img is None:
+            return jsonify({"face_detected": False, "error": "Invalid image"}), 400
+
+        if not predictor or not face_recognizer:
+            return jsonify({"face_detected": False, "error": "Face recognition not loaded"}), 500
+
+        emb = get_face_embedding(cv2_img)
+        if emb is None:
+            try:
+                debug_dir = os.path.join(_script_dir, "debug_frames")
+                os.makedirs(debug_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(debug_dir, "last_no_face.jpg"), cv2_img)
+            except Exception:
+                pass
+        return jsonify({
+            "face_detected": emb is not None and len(emb) == 128,
+            "hint": "Face the camera directly, ensure good lighting, move slightly closer." if emb is None else None,
+        })
+    except Exception as e:
+        logger.exception("check_face error: %s", e)
+        return jsonify({"face_detected": False, "error": str(e)}), 500
+
+
 @app.route('/register', methods=['POST'])
 def finalize_registration():
     try:
@@ -636,8 +857,13 @@ def finalize_registration():
             logger.error(f"Error saving photo: {e}")
             return jsonify({"success": False, "message": "Failed to save photo"}), 500
 
-        # Generate face embedding; store photo either way (gate uses QR when no embedding)
+        # Generate face embedding (required for face recognition at gate)
         try:
+            if not predictor or not face_recognizer:
+                return jsonify({
+                    "success": False,
+                    "message": "Face recognition is not available. Please ensure dlib and model files (shape_predictor_68_face_landmarks.dat, dlib_face_recognition_resnet_model_v1.dat) are installed in Register_App."
+                }), 500
             np_img = np.frombuffer(base64.b64decode(photo_base64), np.uint8)
             cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
             if cv2_img is None:
@@ -654,9 +880,15 @@ def finalize_registration():
             embedding_array = get_face_embedding(cv2_img)
             if embedding_array is not None:
                 embedding_str = " ".join(map(str, embedding_array.flatten().tolist()))
-            else:
+            elif OVERRIDE_FACE_REQUIRED:
                 embedding_str = ""
-                logger.info("No face detected; storing photo only (gate will use QR for this visitor)")
+                logger.warning("No face detected; OVERRIDE_FACE_REQUIRED=True, allowing registration (QR-only at gate)")
+            else:
+                logger.warning("No face detected in registration photo")
+                return jsonify({
+                    "success": False,
+                    "message": "No face detected in the photo. Please ensure your face is clearly visible, well-lit, and facing the camera directly. Try again in good lighting. (Tip: Add OVERRIDE_FACE_REQUIRED=True to .env to register without face—you'll use QR at the gate.)"
+                }), 400
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             return jsonify({"success": False, "message": "Face analysis failed"}), 500
@@ -884,19 +1116,22 @@ def check_in():
         email_status = session.get("email_status", "unknown")
         email_message = session.get("email_message", "")
 
+        # When email was skipped (e.g. returning user + env vars missing), show QR on page so user can get it
+        show_qr_on_page = email_status == "skipped"
+        visitor_for_template = {"basic_info": basic_info} if basic_info else None
+
         logger.info(f"Rendering check-in page for {basic_info.get('name', 'Unknown')}")
 
-        # Sensitive data (QR, visit details, visitor info) is sent by email only; do not show on this page
         return render_template(
             "check_in.html",
-            visitor=None,
-            basic_info=None,
+            visitor=visitor_for_template if show_qr_on_page else None,
+            basic_info=basic_info,
             email_status=email_status,
             email_message=email_message,
-            recent_visit=None,
+            recent_visit=recent_visit if show_qr_on_page else None,
             visitor_id=visitor_id,
-            qr_image=None,
-            details_sent_by_email=True,
+            qr_image=qr_image_base64 if show_qr_on_page and qr_image_base64 else None,
+            details_sent_by_email=not show_qr_on_page,
         )
 
     except Exception as e:
@@ -912,6 +1147,31 @@ def check_in():
             email_status="error",
             email_message="Error loading visitor data",
         )
+
+@app.route("/resend_qr_email", methods=["POST"])
+def resend_qr_email():
+    """Let returning user enter email to receive QR + visit details (e.g. when email was skipped)."""
+    try:
+        data = request.get_json() or request.form
+        visitor_id = (data.get("visitor_id") or session.get("visitor_id") or "").strip()
+        email = (data.get("email") or "").strip()
+        if not visitor_id or not email:
+            return jsonify({"success": False, "message": "Visitor ID and email are required."}), 400
+        visitor_data = db_ref.child(f"visitors/{visitor_id}").get() if db_ref else None
+        if not visitor_data:
+            return jsonify({"success": False, "message": "Visitor not found."}), 404
+        basic_info = visitor_data.get("basic_info", {})
+        profile_link = basic_info.get("profile_link") or (request.url_root.rstrip("/") + url_for("profile_page", visitor_id=visitor_id))
+        visitor_name = basic_info.get("name", "Visitor")
+        email_success, email_message = send_email(email, visitor_name, profile_link)
+        if email_success:
+            return jsonify({"success": True, "message": "QR and visit details sent to your email."})
+        if "Email environment variables missing" in (email_message or ""):
+            return jsonify({"success": False, "message": "Email service not configured. Your QR code is shown on this page—save or screenshot it."})
+        return jsonify({"success": False, "message": email_message or "Email could not be sent."}), 400
+    except Exception as e:
+        logger.exception("resend_qr_email error")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route("/profile/<visitor_id>")
 def profile_page(visitor_id):
@@ -1222,6 +1482,16 @@ def employee_action_reschedule(visitor_id):
 def verify_page():
     logger.info("Verify page accessed")
     return render_template('verify.html')
+
+
+@app.route("/debug_session")
+def debug_session():
+    """Diagnostic: check if session has visitor_id (for returning visitor flow)."""
+    return jsonify({
+        "visitor_id": session.get("visitor_id"),
+        "has_visitor_id": bool(session.get("visitor_id")),
+        "hint": "If has_visitor_id is false after verify-face, session may not be persisting.",
+    })
 @app.route("/verify-face", methods=['POST'])
 def verify_face():
     data = request.get_json()
@@ -1289,8 +1559,8 @@ def verify_face():
 
         logger.info(f"Verification summary: {visitor_count} visitors checked, {valid_embeddings} valid embeddings, best distance: {min_distance:.4f}")
 
-        THRESHOLD = 0.6
-        
+        THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))  # 0.65 more lenient for real-world
+
         if min_distance <= THRESHOLD and matched_id:
             # Fetch visitor name for logging
             visitor_data = db_ref.child(f"visitors/{matched_id}").get() or {}
@@ -1364,6 +1634,7 @@ def old_register():
         purpose = "Not specified"
 
         # Find employee by name instead of ID
+        employee_id = None
         if purpose_type == "employee" and selected_employee_name:
             employee_found = False
             for emp_id, emp_data in employees_data.items():
@@ -1372,14 +1643,20 @@ def old_register():
                     employee_email = emp_data.get("email")
                     department = emp_data.get("department", "N/A")
                     purpose = f"Meeting with {employee_name} ({department})"
+                    employee_id = emp_id
                     employee_found = True
                     break
-            
+
             if not employee_found:
                 purpose = f"Meeting with {selected_employee_name} (Employee details not found)"
                 employee_name = selected_employee_name
-        elif purpose_type == "other" and other_purpose:
-            purpose = other_purpose
+        elif purpose_type == "other":
+            purpose = (other_purpose or "").strip() or "Other"
+
+        # Determine if employee approval is needed (same logic as new registration)
+        requires_employee_approval = bool(employee_name and employee_id)
+        initial_status = "Pending Approval" if requires_employee_approval else "Registered"
+        is_approved = not requires_employee_approval
 
         # Update basic visitor info
         visitor_ref = db_ref.child(f"visitors/{visitor_id}")
@@ -1387,11 +1664,12 @@ def old_register():
             "last_visit": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # --- Create a new visit record ---
+        # --- Create a new visit record (aligned with new registration structure) ---
         visit_id = str(int(time() * 1000))
         visit_record = {
             "visit_id": visit_id,
             "purpose": purpose,
+            "employee_id": employee_id,
             "employee_name": employee_name if employee_name else "N/A",
             "duration": duration,
             "visit_date": visit_date if visit_date else datetime.now().strftime("%Y-%m-%d"),
@@ -1399,13 +1677,17 @@ def old_register():
             "check_in_time": None,
             "check_out_time": None,
             "time_spent": None,
-            "status": "Registered",
-            "visit_approved": False if employee_name else True,  # approval needed if meeting employee
-            "has_visited": False
+            "status": initial_status,
+            "visit_approved": is_approved,
+            "has_visited": False,
+            "requires_employee_approval": requires_employee_approval,
+            "employee_notified": False,
+            "employee_actions": [],
         }
 
         # Store new visit under "visits" node
         visitor_ref.child(f"visits/{visit_id}").set(visit_record)
+        visitor_ref.update({"status": initial_status, "last_visit_id": visit_id})
         logger.info(f"New visit added under returning visitor {visitor_id}")
 
         # ✅ GENERATE QR CODE for returning visitor's new visit
@@ -1432,8 +1714,13 @@ def old_register():
         visitor_email = visitor_data.get("basic_info", {}).get("contact")
         visitor_name = visitor_data.get("basic_info", {}).get("name")
         email_success, email_message = send_email(visitor_email, visitor_name, profile_link)
-        session["email_status"] = "success" if email_success else "failure"
-        session["email_message"] = email_message
+        # For returning users: do not show "Email Not Sent" when env vars are missing (silent skip)
+        if not email_success and "Email environment variables missing" in (email_message or ""):
+            session["email_status"] = "skipped"
+            session["email_message"] = ""
+        else:
+            session["email_status"] = "success" if email_success else "failure"
+            session["email_message"] = email_message
         logger.info(f"Returning visitor email: {'Success' if email_success else 'Failed'}")
 
         # --- Notify employee for approval/rejection ---
@@ -1458,6 +1745,11 @@ def old_register():
                 profile_url
             )
             employee_notification_sent = emp_success
+            if emp_success:
+                visitor_ref.child(f"visits/{visit_id}").update({
+                    "employee_notified": True,
+                    "notification_sent_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
             logger.info(f"Employee notification: {'Success' if emp_success else 'Failed'} - {emp_message}")
 
         logger.info(f"Returning visitor registration completed for {visitor_name}")

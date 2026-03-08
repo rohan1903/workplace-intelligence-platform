@@ -3,7 +3,7 @@ Flask
 firebase-admin
 python-dotenv
 opencv-python
-numpy
+numpy<2  # dlib requires NumPy 1.x (NumPy 2.0 causes "Unsupported image type" error)
 qrcode[pil]
 # Face recognition (REQUIRED for project)
 cmake

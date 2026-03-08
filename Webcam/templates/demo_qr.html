@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Demo QR – Webcam Gate</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 2rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 { font-size: 1.25rem; margin-bottom: 0.5rem; font-weight: 600; }
+        p { margin: 0 0 1.5rem; font-size: 0.9rem; color: #aaa; max-width: 320px; text-align: center; }
+        #qrcode {
+            padding: 1rem;
+            background: #fff;
+            border-radius: 12px;
+            display: inline-block;
+        }
+        #qrcode img { display: block; }
+        .hint { margin-top: 1.5rem; font-size: 0.85rem; color: #888; }
+    </style>
+</head>
+<body>
+    <h1>Demo QR for Webcam Gate</h1>
+    <p>Show this QR to the camera at the check-in gate. It matches visitor <strong>Aarav Sharma</strong> (visitor_demo_1).</p>
+    <div id="qrcode"></div>
+    <p class="hint">Gate: <a href="/checkin_gate" style="color: #6b9fff;">/checkin_gate</a></p>
+    <script>
+        (function() {
+            var payload = {{ qr_payload | tojson }};
+            new QRCode(document.getElementById("qrcode"), {
+                text: payload,
+                width: 256,
+                height: 256
+            });
+        })();
+    </script>
+</body>
+</html>

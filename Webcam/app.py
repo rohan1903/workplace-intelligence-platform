@@ -34,13 +34,16 @@ from qr_module import (
     QR_UNUSED, QR_CHECKIN_USED, QR_CHECKOUT_USED, QR_ASSUMED_SCANNED, QR_INVALIDATED,
 )
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (from Webcam dir and project root)
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_script_dir, ".env"))
+load_dotenv()  # Also load from cwd
 
 # --- Configuration ---
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "gate_app_secret_key_123") 
-VERIFICATION_THRESHOLD = 0.6 
+VERIFICATION_THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.82"))  # 0.82 lenient; 0.78 stricter. Lower distance = better match.
+CHECKIN_COOLDOWN_SECONDS = int(os.environ.get("CHECKIN_COOLDOWN_SECONDS", "90"))  # Min seconds between check-in and checkout (prevents accidental double-scan)
 COMPANY_IP = os.environ.get("COMPANY_IP")
 
 # Protocol mode: hybrid (default), face_only, qr_only (for research comparison)
@@ -201,9 +204,22 @@ if USE_MOCK_DATA:
 else:
     if not firebase_admin._apps:
         try:
-            if not os.path.exists("firebase_credentials.json"):
-                raise FileNotFoundError("firebase_credentials.json not found")
-            cred = credentials.Certificate("firebase_credentials.json")
+            # Look for firebase_credentials.json in Webcam, parent, or Admin folder
+            _cred_paths = [
+                os.path.join(_script_dir, "firebase_credentials.json"),
+                os.path.join(os.path.dirname(_script_dir), "firebase_credentials.json"),
+                os.path.join(os.path.dirname(_script_dir), "Admin", "firebase_credentials.json"),
+                os.path.join(os.path.dirname(_script_dir), "Register_App", "firebase_credentials.json"),
+                "firebase_credentials.json",
+            ]
+            _cred_path = None
+            for p in _cred_paths:
+                if p and os.path.isfile(p):
+                    _cred_path = p
+                    break
+            if not _cred_path:
+                raise FileNotFoundError("firebase_credentials.json not found in Webcam, parent, Admin, or Register_App")
+            cred = credentials.Certificate(_cred_path)
             database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
             firebase_admin.initialize_app(cred, {"databaseURL": database_url})
             print("[OK] Firebase initialized successfully.")
@@ -256,9 +272,9 @@ def l2_distance(vec1, vec2):
             vec1 = vec1.reshape(vec2.shape)
     return np.linalg.norm(vec1 - vec2)
 
-# --- YuNet (primary) + Dlib + OpenCV Haar (same pipeline as Register_App) ---
+# --- YuNet + Dlib + OpenCV Haar (aligned with Register_App pipeline) ---
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-detector = predictor = face_recognizer = _cv_face_cascade = _yunet_detector = None
+detector = predictor = face_recognizer = _cv_face_cascade = _cv_face_alt2 = _yunet_detector = None
 _yunet_model_path = None
 if dlib:
     try:
@@ -270,6 +286,10 @@ if dlib:
         _cv_face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
+        try:
+            _cv_face_alt2 = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
+        except Exception:
+            _cv_face_alt2 = None
         _yunet_model_path = os.path.join(_script_dir, "face_detection_yunet_2023mar.onnx")
         if hasattr(cv2, "FaceDetectorYN") and os.path.isfile(_yunet_model_path):
             try:
@@ -300,13 +320,27 @@ def _embed_from_bbox(rgb_img, x, y, w, h):
     except Exception:
         return None
 
+def _to_dlib_format(img, rgb=True):
+    """Ensure image is uint8 contiguous for dlib (8-bit gray or RGB). Fixes NumPy 2.0 / dlib compatibility."""
+    if img is None:
+        return None
+    try:
+        out = np.ascontiguousarray(img.astype(np.uint8))
+        if out.ndim == 3 and rgb and out.shape[2] >= 3:
+            out = cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
+            out = np.ascontiguousarray(out)
+        return out
+    except Exception:
+        return None
+
 def _get_face_embedding_at_scale(cv2_img, min_side):
-    """Run full detection pipeline at one scale. min_side=0 means no resize."""
+    """Run full detection pipeline at one scale. min_side=0 means no resize. Aligned with Register_App."""
     if cv2_img is None or cv2_img.size == 0:
         return None
-    bgr_img = np.ascontiguousarray(cv2_img)
-    rgb_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB))
-    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY))
+    cv2_img = np.ascontiguousarray(cv2_img.astype(np.uint8))
+    bgr_img = cv2_img
+    rgb_img = _to_dlib_format(cv2_img, rgb=True)
+    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY).astype(np.uint8))
     h, w = rgb_img.shape[:2]
     if min_side > 0 and min(h, w) < min_side:
         scale = min_side / min(h, w)
@@ -318,6 +352,18 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
     rgb_img = np.ascontiguousarray(rgb_img)
     gray_img = np.ascontiguousarray(gray_img)
     h, w = rgb_img.shape[:2]
+
+    # Try Haar first (often more forgiving for frontal faces in varied lighting) - same as Register_App
+    for cascade in (_cv_face_cascade, _cv_face_alt2):
+        if cascade is None:
+            continue
+        for (sf, mn, ms) in [(1.25, 2, (15, 15)), (1.2, 2, (20, 20)), (1.15, 3, (15, 15)), (1.1, 2, (25, 25))]:
+            rects = cascade.detectMultiScale(gray_img, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+            if len(rects) > 0:
+                x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                out = _embed_from_bbox(rgb_img, x, y, rw, rh)
+                if out is not None:
+                    return out
 
     if _yunet_detector is not None:
         _yunet_detector.setInputSize((w, h))
@@ -348,12 +394,14 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
                     shape = predictor(rgb, face)
                     emb = face_recognizer.compute_face_descriptor(rgb, shape)
                     return np.array(emb)
-        if _cv_face_cascade is not None:
+        for cascade in (_cv_face_cascade, _cv_face_alt2):
+            if cascade is None:
+                continue
             for (sf, mn, ms) in [
-                (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
-                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)),
+                (1.3, 2, (10, 10)), (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
+                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)), (1.1, 2, (25, 25)),
             ]:
-                rects = _cv_face_cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+                rects = cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
                 if len(rects) > 0:
                     x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
                     dlib_rect = dlib.rectangle(int(x), int(y), int(x + rw), int(y + rh))
@@ -370,32 +418,43 @@ def _get_face_embedding_at_scale(cv2_img, min_side):
     return try_detect(rgb_f, gray_f)
 
 def get_face_embedding(cv2_img):
-    """Same pipeline as Register_App: multi-scale, YuNet + dlib + Haar."""
+    """Same pipeline as Register_App: multi-scale, YuNet + dlib + Haar, histogram eq, mirrored."""
     if not predictor or not face_recognizer or cv2_img is None or cv2_img.size == 0:
         return None
     try:
         h, w = cv2_img.shape[:2]
         max_side = max(h, w)
         images_to_try = [cv2_img]
+        # Downscale for large images (detectors often work better at 480–640px)
         if max_side > 640:
             scale = 640.0 / max_side
-            new_w, new_h = int(w * scale), int(h * scale)
-            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            small = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             images_to_try.append(small)
         if max_side > 480:
             scale = 480.0 / max_side
-            new_w, new_h = int(w * scale), int(h * scale)
-            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            small = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             images_to_try.append(small)
+        # Upscale for small images (face may be too small to detect)
+        if max_side < 400:
+            scale = 480.0 / max_side
+            large = cv2.resize(cv2_img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(large)
+        # Histogram equalization can help in poor lighting
+        gray = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY)
+        gray_eq = cv2.equalizeHist(gray)
+        gray_eq_bgr = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
+        images_to_try.append(gray_eq_bgr)
+        # Mirrored image (webcam often shows mirrored view; capture might differ)
+        images_to_try.append(cv2.flip(cv2_img, 1))
 
         for img in images_to_try:
-            for min_side in (0, 256, 320, 400, 512):
+            for min_side in (0, 256, 320, 400, 512, 200):
                 out = _get_face_embedding_at_scale(img, min_side)
                 if out is not None:
                     return out
         return None
     except Exception as e:
-        print(f"[!] ERROR during Dlib embedding generation: {e}")
+        logger.error("Dlib embedding error: %s", e)
         return None
 
 def verify_by_distance(live_embedding):
@@ -418,15 +477,13 @@ def verify_by_distance(live_embedding):
             continue
 
         try:
-            # Convert space-separated string to numpy array
-            stored_embedding = np.fromstring(emb_raw, sep=' ')
-            
-            # Ensure correct shape for distance calculation
-            if stored_embedding.ndim == 1:
-                stored_embedding = stored_embedding.reshape(1, -1)
+            # Convert space-separated string to numpy array (np.fromstring is deprecated)
+            stored_embedding = np.array([float(x) for x in str(emb_raw).strip().split()])
+            if stored_embedding.size != 128:
+                continue
 
-            # Compute Euclidean distance
-            distance = l2_distance(live_embedding, stored_embedding)
+            # Compute Euclidean distance (both as 1D vectors)
+            distance = l2_distance(np.asarray(live_embedding).flatten(), stored_embedding)
 
             # Keep track of the closest match
             if distance < min_distance:
@@ -616,8 +673,14 @@ def check_for_expiring_visits():
 @app.route("/")
 @app.route("/checkin_gate")
 def checkin_gate():
-    """The main interface for automatic check-in/check-out."""
-    return render_template("checkin_gate.html")
+    """Step 1: Choose action and scan QR code."""
+    return render_template("gate_qr.html")
+
+
+@app.route("/checkin_gate/face")
+def checkin_gate_face():
+    """Step 2: Face verification (QR must be scanned first)."""
+    return render_template("gate_face.html")
 
 
 @app.route("/debug_last_frame")
@@ -628,6 +691,62 @@ def debug_last_frame():
         return "<p>No debug frame saved yet. Use the gate and trigger 'No face detected' once.</p>", 404
     from flask import send_file
     return send_file(debug_path, mimetype="image/jpeg")
+
+
+@app.route("/api/check_face", methods=["POST"])
+def api_check_face():
+    """Lightweight face detection for live UI feedback (like Register_App). Returns {face_detected: bool}."""
+    try:
+        data = request.get_json()
+        if not data or "image" not in data:
+            return jsonify({"face_detected": False, "error": "No image"}), 400
+        try:
+            captured_base64 = data["image"].split(",")[1]
+        except Exception:
+            return jsonify({"face_detected": False, "error": "Invalid image"}), 400
+        np_img = np.frombuffer(base64.b64decode(captured_base64), np.uint8)
+        cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        if cv2_img is None:
+            return jsonify({"face_detected": False, "error": "Unable to decode image"}), 400
+        emb = get_face_embedding(cv2_img)
+        return jsonify({
+            "face_detected": emb is not None and len(emb) == 128,
+            "hint": "Position your face inside the oval, ensure good lighting." if emb is None else None,
+        })
+    except Exception as e:
+        logger.exception("check_face error")
+        return jsonify({"face_detected": False, "error": str(e)}), 500
+
+
+@app.route("/debug_gate")
+def debug_gate():
+    """Diagnostic endpoint: shows gate config, visitor count, and embedding status."""
+    try:
+        all_visitors = db_reference("visitors").get() or {}
+        total = len(all_visitors)
+        with_embedding = 0
+        sample_names = []
+        for vid, data in all_visitors.items():
+            basic = data.get("basic_info", {})
+            emb = basic.get("embedding")
+            if emb and len(str(emb).strip().split()) == 128:
+                with_embedding += 1
+            if len(sample_names) < 5:
+                sample_names.append(basic.get("name", "?"))
+
+        return jsonify({
+            "status": "ok",
+            "use_mock_data": USE_MOCK_DATA,
+            "auth_mode": AUTH_MODE,
+            "verification_threshold": VERIFICATION_THRESHOLD,
+            "dlib_loaded": dlib is not None,
+            "visitor_count": total,
+            "visitors_with_embedding": with_embedding,
+            "sample_names": sample_names,
+            "hint": "If visitors_with_embedding is 0, face recognition cannot work. Register with camera to capture face." if with_embedding == 0 and total > 0 else None,
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/dashboard")
@@ -774,6 +893,15 @@ def mock_auth():
     if visit_status == "checked_in":
         if has_visited:
             return jsonify({"status": "denied", "message": "Visit already completed. Register a new visit.", "distance": 0.21})
+        if check_in_time:
+            try:
+                checkin_dt = datetime.strptime(check_in_time, "%Y-%m-%d %H:%M:%S")
+                elapsed = (datetime.now() - checkin_dt).total_seconds()
+                if elapsed < CHECKIN_COOLDOWN_SECONDS:
+                    wait_sec = int(CHECKIN_COOLDOWN_SECONDS - elapsed)
+                    return jsonify({"status": "denied", "message": f"You just checked in. Please wait {wait_sec} seconds before checking out.", "distance": 0.21})
+            except (ValueError, TypeError):
+                pass
         return process_checkout(mock_face_id, visit_id, visitor_name, visitor_email,
                                 check_in_time, duration, 0.21, client_ip,
                                 purpose, employee_name, auth_mode=auth_mode,
@@ -822,6 +950,11 @@ def checkin_verify_and_log():
         cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
         if cv2_img is None:
             return jsonify({"status": "waiting", "message": "Unable to decode image.", "distance": 999.0})
+
+        # ──────────────────────────────────────
+        # Requested action: checkin | checkout (enforces which flow to allow)
+        # ──────────────────────────────────────
+        requested_action = (data.get("action") or "").strip().lower() or "auto"
 
         # ──────────────────────────────────────
         # STEP B: Parse & validate QR (if provided) — before face for qr_only mode
@@ -886,6 +1019,21 @@ def checkin_verify_and_log():
             rejection_reason = target_visit.get("rejection_reason", "")
             new_visit_date = target_visit.get("new_visit_date", "")
 
+            # Enforce requested action (checkin vs checkout)
+            if requested_action == "checkin" and visit_status.lower() in ("checked_in", "checked_out"):
+                if visit_status.lower() == "checked_in":
+                    return jsonify({"status": "denied", "message": "You are already checked in. Use Check Out instead.", "distance": 999.0})
+                return jsonify({"status": "denied", "message": "No visit to check in. Use Check Out instead.", "distance": 999.0})
+            if requested_action == "checkout" and visit_status.lower() not in ("checked_in",):
+                if visit_status.lower() in ("registered", "approved", "pending approval"):
+                    return jsonify({"status": "denied", "message": "Please use Check In first.", "distance": 999.0})
+                if visit_status.lower() == "checked_out":
+                    return jsonify({"status": "denied", "message": "You are already checked out.", "distance": 999.0})
+                if visit_status.lower() in ("rejected", "rescheduled"):
+                    return jsonify({"status": "denied", "message": f"Your visit has been {visit_status}.", "distance": 999.0})
+                if visit_status.lower() == "exceeded":
+                    return jsonify({"status": "denied", "message": "Duration exceeded. Please contact security.", "distance": 999.0})
+
             if visit_status.lower() == "registered":
                 if employee_name and employee_name not in ["N/A", ""]:
                     return jsonify({"status": "denied", "message": f"Meeting pending approval from {employee_name}. Please wait.", "distance": 999.0})
@@ -917,6 +1065,16 @@ def checkin_verify_and_log():
             elif visit_status.lower() == "checked_in":
                 if has_visited:
                     return jsonify({"status": "denied", "message": "Visit already completed. Please register a new visit.", "distance": 999.0})
+                # Enforce minimum time between check-in and checkout
+                if check_in_time:
+                    try:
+                        checkin_dt = datetime.strptime(check_in_time, "%Y-%m-%d %H:%M:%S")
+                        elapsed = (datetime.now() - checkin_dt).total_seconds()
+                        if elapsed < CHECKIN_COOLDOWN_SECONDS:
+                            wait_sec = int(CHECKIN_COOLDOWN_SECONDS - elapsed)
+                            return jsonify({"status": "denied", "message": f"You just checked in. Please wait {wait_sec} seconds before checking out.", "distance": 999.0})
+                    except (ValueError, TypeError):
+                        pass
                 return process_checkout(qr_visitor_id, qr_visit_id, visitor_name, visitor_email,
                                        check_in_time, duration, 0.0, client_ip,
                                        purpose, employee_name, auth_mode="QR_ONLY", has_qr=True, auth_mode_config=AUTH_MODE)
@@ -958,9 +1116,9 @@ def checkin_verify_and_log():
         # ──────────────────────────────────────
         # STEP C: Face matching + twin detection
         # ──────────────────────────────────────
-        all_visitors = db_ref.child("visitors").get() or {}
+        all_visitors = db_reference("visitors").get() or {}
 
-        THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))
+        THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", str(VERIFICATION_THRESHOLD)))
         TWIN_STRONG = 0.45  # Below this → definitive match, no twin ambiguity
 
         face_matches = find_all_face_matches(live_embedding, all_visitors, threshold=THRESHOLD)
@@ -979,6 +1137,9 @@ def checkin_verify_and_log():
             # If best distance is very high (>2), stored embedding was likely fake (registration had no face)
             if best_distance < 999.0 and best_distance > 2.0:
                 deny_msg = "Face not recognized. Your face may not have been saved correctly when you registered—please re-register with your face clearly visible in the photo, then try again."
+            # Always include distance when available (helps diagnose: threshold is 0.78, lower = better match)
+            if best_distance < 999.0:
+                deny_msg += f" (Distance: {best_distance:.2f} — threshold is {THRESHOLD:.2f}. Try: same lighting as registration, face camera directly, remove glasses if you wore them during registration, or re-register.)"
             return jsonify({
                 "status": "denied",
                 "message": deny_msg,
@@ -1109,6 +1270,28 @@ def checkin_verify_and_log():
                      f"status={visit_status}, auth={auth_mode}, dist={min_distance:.4f}")
 
         # ──────────────────────────────────────
+        # Require QR + face when explicit action is requested
+        if requested_action in ("checkin", "checkout") and AUTH_MODE == "hybrid" and not has_qr:
+            msg = "Please scan your QR code and show your face to check in." if requested_action == "checkin" else "Please scan your QR code and show your face to check out."
+            return jsonify({"status": "denied", "message": msg, "distance": min_distance})
+
+        # Enforce requested action (checkin vs checkout)
+        # ──────────────────────────────────────
+        if requested_action == "checkin" and visit_status.lower() in ("checked_in", "checked_out"):
+            if visit_status.lower() == "checked_in":
+                return jsonify({"status": "denied", "message": "You are already checked in. Use Check Out instead.", "distance": min_distance})
+            return jsonify({"status": "denied", "message": "No visit to check in. Use Check Out instead.", "distance": min_distance})
+        if requested_action == "checkout" and visit_status.lower() not in ("checked_in",):
+            if visit_status.lower() in ("registered", "approved", "pending approval"):
+                return jsonify({"status": "denied", "message": "Please use Check In first.", "distance": min_distance})
+            if visit_status.lower() == "checked_out":
+                return jsonify({"status": "denied", "message": "You are already checked out.", "distance": min_distance})
+            if visit_status.lower() in ("rejected", "rescheduled"):
+                return jsonify({"status": "denied", "message": f"Your visit has been {visit_status}.", "distance": min_distance})
+            if visit_status.lower() == "exceeded":
+                return jsonify({"status": "denied", "message": "Duration exceeded. Please contact security.", "distance": min_distance})
+
+        # ──────────────────────────────────────
         # STEP G: Handle visit status (7 states + Pending Approval)
         # ──────────────────────────────────────
 
@@ -1157,7 +1340,7 @@ def checkin_verify_and_log():
                 msg = f"{employee_name} rescheduled your visit to {reschedule_date}."
             return jsonify({"status": "denied", "message": msg, "distance": min_distance})
 
-        # 5. CHECKED-IN → process checkout
+        # 5. CHECKED-IN → process checkout (with cooldown to prevent accidental double-scan)
         elif visit_status.lower() == "checked_in":
             if has_visited:
                 return jsonify({
@@ -1165,6 +1348,20 @@ def checkin_verify_and_log():
                     "message": "Visit already completed. Please register a new visit.",
                     "distance": min_distance
                 })
+            # Enforce minimum time between check-in and checkout
+            if check_in_time:
+                try:
+                    checkin_dt = datetime.strptime(check_in_time, "%Y-%m-%d %H:%M:%S")
+                    elapsed = (datetime.now() - checkin_dt).total_seconds()
+                    if elapsed < CHECKIN_COOLDOWN_SECONDS:
+                        wait_sec = int(CHECKIN_COOLDOWN_SECONDS - elapsed)
+                        return jsonify({
+                            "status": "denied",
+                            "message": f"You just checked in. Please wait {wait_sec} seconds before checking out.",
+                            "distance": min_distance
+                        })
+                except (ValueError, TypeError):
+                    pass
             return process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
                                    check_in_time, duration, min_distance, client_ip,
                                    purpose, employee_name, auth_mode, has_qr, auth_mode_config=AUTH_MODE)
@@ -1581,6 +1778,7 @@ def employee_action_approve(visitor_id):
 if __name__ == "__main__":
     print("--- GATE APP STARTUP ---")
     print(f"VERIFICATION THRESHOLD: {VERIFICATION_THRESHOLD}")
+    print(f"CHECKIN_COOLDOWN: {CHECKIN_COOLDOWN_SECONDS}s (min time before checkout after check-in)")
     print(f"AUTH_MODE (protocol): {AUTH_MODE} (hybrid | face_only | qr_only)")
     print(f"USE_MOCK_DATA: {USE_MOCK_DATA}")
     if COMPANY_IP:

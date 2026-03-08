@@ -3,219 +3,55 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Workplace Intelligence - Check-In/Out Success</title>
+    <title>Workplace Intelligence - {{ 'Check-Out' if action == 'checked out' else 'Check-In' }} Success</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { font-family: 'Inter', sans-serif; background-color: #f7f9fb; }
-        .camera-container {
-            width: 100%;
-            max-width: 480px;
-            margin: auto;
-            position: relative;
-        }
-        #video-feed {
-            width: 100%;
-            height: auto;
-            border-radius: 12px;
-            transform: scaleX(-1);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
-            border: 5px solid #0d6efd;
-        }
-        #message-box {
-            min-height: 80px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 600;
-            font-size: 1.1rem;
-            border-radius: 8px;
-            padding: 10px;
-        }
-        .message-success { background-color: #d1fae5; color: #065f46; border: 2px solid #34d399; }
-        .message-error { background-color: #fee2e2; color: #991b1b; border: 2px solid #f87171; }
-        .message-waiting { background-color: #eff6ff; color: #1e40af; border: 2px solid #60a5fa; }
-        .message-checkout { background-color: #dbeafe; color: #1e40af; border: 2px solid #3b82f6; }
-
-        @keyframes scan {
-            0% { top: 0; }
-            50% { top: 95%; }
-            100% { top: 0; }
-        }
-        .scanning-line {
-            position: absolute;
-            left: 5%;
-            width: 90%;
-            height: 3px;
-            background: linear-gradient(90deg, transparent, #0d6efd, transparent);
-            animation: scan 3s infinite linear;
-            box-shadow: 0 0 10px #0d6efd;
-        }
+        .success-card { transition: all 0.3s ease; }
+        .success-checkin { background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border: 2px solid #34d399; }
+        .success-checkout { background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); border: 2px solid #3b82f6; }
     </style>
 </head>
 <body class="p-4 md:p-8">
     <div class="container mx-auto max-w-xl text-center">
         <h1 class="text-4xl font-extrabold text-gray-800 mb-6">
-            <span class="text-blue-600">Secure Gate</span> Access
+            <span class="text-blue-600">Workplace Intelligence</span> Gate
         </h1>
-        <p class="text-gray-600 mb-8">Please look directly into the camera for Check-In or Check-Out.</p>
 
-        <div id="message-box" class="message-waiting mb-6 transition duration-300">
-            Scanning for visitor...
+        {% if visitor_name and action %}
+        <!-- Success view: show message for check-in or check-out -->
+        <div class="success-card rounded-2xl shadow-xl p-8 md:p-12 mb-6 {{ 'success-checkin' if action == 'checked in' else 'success-checkout' }}">
+            <div class="w-20 h-20 mx-auto mb-6 rounded-full flex items-center justify-center {{ 'bg-green-500' if action == 'checked in' else 'bg-blue-500' }} text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+                </svg>
+            </div>
+            {% if action == 'checked in' %}
+            <h2 class="text-2xl font-bold text-gray-800 mb-2">Welcome, {{ visitor_name }}!</h2>
+            <p class="text-gray-600">Check-in successful. You may proceed.</p>
+            {% else %}
+            <h2 class="text-2xl font-bold text-gray-800 mb-2">Thank you, {{ visitor_name }}!</h2>
+            <p class="text-gray-600">Check-out successful.</p>
+            {% if duration %}
+            <p class="text-gray-500 text-sm mt-2">Time spent: {{ duration }}</p>
+            {% endif %}
+            {% endif %}
         </div>
-
-        <div class="camera-container">
-            <video id="video-feed" autoplay playsinline></video>
-            <canvas id="photo-canvas" style="display: none;"></canvas>
-            <div class="scanning-line"></div>
+        <a href="/checkin_gate" class="inline-flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-xl font-semibold transition-all shadow-lg">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+            <span>Next Visitor</span>
+        </a>
+        {% else %}
+        <!-- Fallback: no params, link to gate -->
+        <div class="bg-white rounded-2xl shadow-xl p-8 mb-6 border-2 border-gray-200">
+            <p class="text-gray-600 mb-6">Session complete. Proceed to the gate for check-in or check-out.</p>
+            <a href="/checkin_gate" class="inline-flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-8 py-4 rounded-xl font-semibold transition-all shadow-lg">
+                <span>Go to Gate</span>
+            </a>
         </div>
+        {% endif %}
 
-        <p class="text-xs text-gray-400 mt-4">System is secured to Kiosk IP Address: ({{ COMPANY_IP }})</p>
+        <p class="text-xs text-gray-400 mt-8">System is secured to Kiosk IP Address.</p>
     </div>
-
-    <script>
-        const video = document.getElementById('video-feed');
-        const canvas = document.getElementById('photo-canvas');
-        const context = canvas.getContext('2d');
-        const messageBox = document.getElementById('message-box');
-        let intervalId;
-        let isProcessing = false;
-        let windowStream = null;
-
-        // --- Camera Setup ---
-        async function setupCamera() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-                video.srcObject = stream;
-                windowStream = stream; // Store stream globally
-                video.onloadedmetadata = () => {
-                    video.play();
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                    startVerificationLoop();
-                };
-            } catch (err) {
-                console.error("Error accessing camera:", err);
-                messageBox.className = 'message-error mb-6';
-                messageBox.textContent = "❌ ERROR: Could not access camera. Please check permissions.";
-                speakMessage("Error. Could not access camera. Please check permissions.");
-            }
-        }
-
-        // --- Capture and Verify ---
-        function captureAndVerify() {
-            if (isProcessing) return;
-            if (video.videoWidth === 0 || video.videoHeight === 0) return;
-
-            isProcessing = true;
-            context.clearRect(0, 0, canvas.width, canvas.height);
-            context.translate(canvas.width, 0);
-            context.scale(-1, 1);
-            context.drawImage(video, 0, 0, canvas.width, canvas.height);
-            context.setTransform(1, 0, 0, 1, 0, 0);
-
-            const dataURL = canvas.toDataURL('image/jpeg', 0.8);
-            
-            fetch('/checkin_verify_and_log', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ image: dataURL }),
-            })
-            .then(response => response.json())
-            .then(data => {
-                console.log("SERVER RESPONSE:", data); // DEBUG
-                isProcessing = false;
-
-                // Handle CHECKED_OUT status
-                if (data.status === 'checked_out') {
-                    console.log("✅ CHECKOUT SUCCESS DETECTED");
-                    messageBox.className = 'message-checkout mb-6 transition duration-300';
-                    messageBox.innerHTML = `✅ ${data.message}`;
-                    speakMessage(data.message);
-                    
-                    // Stop camera immediately
-                    if (windowStream) {
-                        windowStream.getTracks().forEach(track => track.stop());
-                        console.log("📹 Camera stopped for checkout");
-                    }
-                    
-                    clearInterval(intervalId);
-                    
-                    // Redirect to checkout success page
-                    setTimeout(() => {
-                        if (data.redirect_url) {
-                            window.location.href = data.redirect_url;
-                        } else {
-                            window.location.href = '/checkin_success?name=' + encodeURIComponent(data.name) + '&action=checked out&duration=' + encodeURIComponent(data.duration || '');
-                        }
-                    }, 2000);
-                    return;
-                }
-                // Handle GRANTED status (check-in)
-                else if (data.status === 'granted') {
-                    messageBox.className = 'message-success mb-6 transition duration-300';
-                    messageBox.innerHTML = `✅ ${data.message}`;
-                    speakMessage(data.message);
-                    
-                    // Stop camera for check-in too
-                    if (windowStream) {
-                        windowStream.getTracks().forEach(track => track.stop());
-                        console.log("📹 Camera stopped for check-in");
-                    }
-                    
-                    clearInterval(intervalId);
-                    setTimeout(() => {
-                        window.location.href = data.redirect_url;
-                    }, 1500);
-                } 
-                // Handle DENIED/ERROR status
-                else if (data.status === 'denied' || data.status === 'error') {
-                    messageBox.className = 'message-error mb-6 transition duration-300';
-                    messageBox.innerHTML = `${data.message}`;
-                    speakMessage(data.message);
-                } 
-                // Handle WAITING status
-                else if (data.status === 'waiting') {
-                    messageBox.className = 'message-waiting mb-6 transition duration-300';
-                    messageBox.textContent = data.message;
-                }
-                // Handle any other status
-                else {
-                    console.log("Unknown status:", data.status);
-                    messageBox.className = 'message-waiting mb-6 transition duration-300';
-                    messageBox.textContent = data.message || 'Processing...';
-                }
-            })
-            .catch(error => {
-                isProcessing = false;
-                console.error('Network or Server Error:', error);
-                messageBox.className = 'message-error mb-6 transition duration-300';
-                messageBox.textContent = "❌ Network Error. Cannot connect to verification server.";
-                speakMessage("Network error. Cannot connect to verification server.");
-            });
-        }
-
-        // --- Speech Synthesis (Audio Output) ---
-        function speakMessage(message) {
-            if ('speechSynthesis' in window) {
-                const utterance = new SpeechSynthesisUtterance(message);
-                utterance.lang = 'en-US';
-                utterance.pitch = 1;
-                utterance.rate = 1;
-                utterance.volume = 1;
-                window.speechSynthesis.cancel(); // Stop any ongoing speech
-                window.speechSynthesis.speak(utterance);
-            } else {
-                console.warn("Speech Synthesis not supported in this browser.");
-            }
-        }
-
-        // --- Control Loop ---
-        function startVerificationLoop() {
-            intervalId = setInterval(captureAndVerify, 500); 
-        }
-
-        // Initialize camera
-        window.onload = setupCamera;
-    </script>
 </body>
 </html>
