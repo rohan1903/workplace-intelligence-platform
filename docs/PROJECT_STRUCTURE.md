@@ -23,12 +23,11 @@ visitor-management-system/
 │   ├── PROJECT_STATUS_AND_RUNBOOKS.md
 │   ├── FEATURES_CHECKLIST.md
 │   ├── TESTING_GUIDE.md         # Primary testing guide
-│   ├── TESTING_CHECKLIST.md
 │   ├── QUICK_TEST_CHECKLIST.md
-│   ├── TESTING_STRATEGY.md
-│   ├── SCREENSHOT_GUIDE.md
+│   ├── ADMIN_DASHBOARD_TESTING.md
 │   ├── SWITCH_TO_REAL_DATA.md
-│   └── MODEL_FILES.md
+│   ├── MODEL_FILES.md
+│   └── FACE_RECOGNITION_SETUP.md
 │
 ├── Register_App/                # Visitor registration, QR, host approval (Flask, port 5001)
 │   ├── app.py                   # Main entry
@@ -112,7 +111,7 @@ These have been **moved to `_archive/`** so you can review before deleting. Summ
 - **Register_App/templates/old_register.html** — In use by `/old_register`; keep. You may trim large commented blocks.
 - **Register_App/app_attendance.py** — Alternate DeepFace attendance app; heavily commented. Keep if you use it; else consider archiving.
 - **Register_App/speech_app.py** — Alternate speech/feedback app. Keep if you use it.
-- **Testing docs** — `TESTING_GUIDE.md` is the primary guide; `TESTING_CHECKLIST.md`, `QUICK_TEST_CHECKLIST.md`, and `TESTING_STRATEGY.md` overlap. Consider merging or linking from one place (see `docs/README.md`).
+- **Testing docs** — `TESTING_GUIDE.md` is the primary guide; `QUICK_TEST_CHECKLIST.md` is a short reference (see `docs/README.md`).
 
 ---
 

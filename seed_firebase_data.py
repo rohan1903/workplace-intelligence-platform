@@ -68,7 +68,7 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         if "404" in str(e) or "NotFound" in type(e).__name__:
-            print("Firebase returned 404. Create the Realtime Database first (see FIX_DATABASE_AND_SEED.md Step 1).")
+            print("Firebase returned 404. Create the Realtime Database first in Firebase Console (Build → Realtime Database → Create Database).")
         else:
             print(f"Error: {e}")
         sys.exit(1)
