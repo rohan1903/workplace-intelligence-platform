@@ -8,9 +8,13 @@ from io import BytesIO
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
 import firebase_admin
 from firebase_admin import credentials, db
+from firebase_admin.exceptions import NotFoundError
 from datetime import datetime, timedelta
 from time import time
-import dlib
+try:
+    import dlib
+except ImportError:
+    dlib = None  # Face recognition disabled if dlib not installed (e.g. need CMake on Windows)
 from dotenv import load_dotenv
 import smtplib
 from email.mime.text import MIMEText
@@ -64,9 +68,8 @@ db_app = None
 try:
     if not firebase_admin._apps:
         cred = credentials.Certificate("firebase_credentials.json")
-        db_app = firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://v-guard-af8af-default-rtdb.firebaseio.com/'
-        })
+        database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
+        db_app = firebase_admin.initialize_app(cred, {"databaseURL": database_url})
         logger.info("Firebase initialized successfully")
     else:
         db_app = firebase_admin.get_app()
@@ -79,47 +82,152 @@ except Exception as e:
 # Global reference for the database
 db_ref = db.reference() if db_app else None
 
-# --- Dlib models ---
-try:
-    detector = dlib.get_frontal_face_detector()
-    predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-    face_recognizer = dlib.face_recognition_model_v1("dlib_face_recognition_resnet_model_v1.dat")
-    logger.info("Dlib models loaded successfully")
-except Exception as e:
-    logger.error(f"WARNING: Dlib model files not found or initialized: {e}.")
-    def get_face_embedding(cv2_img): 
-        return np.random.rand(1, 128) # Mock array
+# --- YuNet (primary) + Dlib + OpenCV Haar fallback; no placeholder/mock ---
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+detector = predictor = face_recognizer = _cv_face_cascade = _yunet_detector = None
+_yunet_model_path = None
+if dlib:
+    try:
+        _shape_path = os.path.join(_script_dir, "shape_predictor_68_face_landmarks.dat")
+        _face_model_path = os.path.join(_script_dir, "dlib_face_recognition_resnet_model_v1.dat")
+        detector = dlib.get_frontal_face_detector()
+        predictor = dlib.shape_predictor(_shape_path)
+        face_recognizer = dlib.face_recognition_model_v1(_face_model_path)
+        _cv_face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        _yunet_model_path = os.path.abspath(os.path.join(_script_dir, "..", "Webcam", "face_detection_yunet_2023mar.onnx"))
+        if hasattr(cv2, "FaceDetectorYN") and os.path.isfile(_yunet_model_path):
+            try:
+                _yunet_detector = cv2.FaceDetectorYN.create(_yunet_model_path, "", (320, 320))
+                logger.info("YuNet + Dlib + Haar loaded (YuNet primary)")
+            except Exception as e:
+                logger.warning("YuNet init failed, using dlib+Haar only: %s", e)
+                _yunet_detector = None
+        else:
+            if not hasattr(cv2, "FaceDetectorYN"):
+                logger.info("OpenCV FaceDetectorYN not available; using Dlib + Haar only")
+            elif not os.path.isfile(_yunet_model_path):
+                logger.info("YuNet model not found at %s; using Dlib + Haar only", _yunet_model_path)
+            logger.info("Dlib + OpenCV Haar loaded")
+    except Exception as e:
+        logger.error("WARNING: Dlib model files not found or initialized: %s", e)
+
+def _embed_from_bbox(rgb_img, x, y, w, h):
+    """Compute dlib 128D embedding from a face bounding box (e.g. from YuNet)."""
+    if not predictor or not face_recognizer:
+        return None
+    try:
+        dlib_rect = dlib.rectangle(int(x), int(y), int(x + w), int(y + h))
+        shape = predictor(rgb_img, dlib_rect)
+        emb = face_recognizer.compute_face_descriptor(rgb_img, shape)
+        return np.array(emb)
+    except Exception:
+        return None
+
+def _get_face_embedding_at_scale(cv2_img, min_side):
+    """Run full detection pipeline at one scale. min_side=0 means no resize."""
+    if cv2_img is None or cv2_img.size == 0:
+        return None
+    bgr_img = np.ascontiguousarray(cv2_img)
+    rgb_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB))
+    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY))
+    h, w = rgb_img.shape[:2]
+    if min_side > 0 and min(h, w) < min_side:
+        scale = min_side / min(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        bgr_img = cv2.resize(bgr_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        rgb_img = cv2.resize(rgb_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        gray_img = cv2.resize(gray_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    bgr_img = np.ascontiguousarray(bgr_img)
+    rgb_img = np.ascontiguousarray(rgb_img)
+    gray_img = np.ascontiguousarray(gray_img)
+    h, w = rgb_img.shape[:2]
+
+    if _yunet_detector is not None:
+        _yunet_detector.setInputSize((w, h))
+        _, dets = _yunet_detector.detect(bgr_img)
+        if dets is not None and dets.shape[0] >= 1:
+            x, y, rw, rh = dets[0, 0], dets[0, 1], dets[0, 2], dets[0, 3]
+            if rw > 0 and rh > 0:
+                out = _embed_from_bbox(rgb_img, x, y, rw, rh)
+                if out is not None:
+                    return out
+        bgr_f = cv2.flip(bgr_img, 1)
+        rgb_f = cv2.flip(rgb_img, 1)
+        _yunet_detector.setInputSize((w, h))
+        _, dets = _yunet_detector.detect(bgr_f)
+        if dets is not None and dets.shape[0] >= 1:
+            x, y, rw, rh = dets[0, 0], dets[0, 1], dets[0, 2], dets[0, 3]
+            if rw > 0 and rh > 0:
+                out = _embed_from_bbox(rgb_f, x, y, rw, rh)
+                if out is not None:
+                    return out
+
+    def try_detect(rgb, gray):
+        for img in (gray, rgb):
+            for upsample in (0, 1, 2, 3, 4):
+                faces = detector(img, upsample)
+                if len(faces) > 0:
+                    face = faces[0]
+                    shape = predictor(rgb, face)
+                    emb = face_recognizer.compute_face_descriptor(rgb, shape)
+                    return np.array(emb)
+        if _cv_face_cascade is not None:
+            for (sf, mn, ms) in [
+                (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
+                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)),
+            ]:
+                rects = _cv_face_cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+                if len(rects) > 0:
+                    x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                    dlib_rect = dlib.rectangle(int(x), int(y), int(x + rw), int(y + rh))
+                    shape = predictor(rgb, dlib_rect)
+                    emb = face_recognizer.compute_face_descriptor(rgb, shape)
+                    return np.array(emb)
+        return None
+
+    out = try_detect(rgb_img, gray_img)
+    if out is not None:
+        return out
+    rgb_f = cv2.flip(rgb_img, 1)
+    gray_f = cv2.flip(gray_img, 1)
+    return try_detect(rgb_f, gray_f)
+
+def get_face_embedding(cv2_img):
+    """Try multiple scales and optionally downscale; YuNet + dlib + Haar. No placeholder."""
+    if not predictor or not face_recognizer or cv2_img is None or cv2_img.size == 0:
+        return None
+    try:
+        h, w = cv2_img.shape[:2]
+        max_side = max(h, w)
+        # Large images: also try downscaled (detectors often work better at 480–640px)
+        images_to_try = [cv2_img]
+        if max_side > 640:
+            scale = 640.0 / max_side
+            new_w, new_h = int(w * scale), int(h * scale)
+            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(small)
+        if max_side > 480:
+            scale = 480.0 / max_side
+            new_w, new_h = int(w * scale), int(h * scale)
+            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(small)
+
+        for img in images_to_try:
+            for min_side in (0, 256, 320, 400, 512):
+                out = _get_face_embedding_at_scale(img, min_side)
+                if out is not None:
+                    logger.info("Generated embedding (Register) - shape %s", out.shape)
+                    return out
+        return None
+    except Exception as e:
+        logger.error("Dlib embedding error: %s", e)
+        return None
 
 # --- Helper functions ---
 def l2_distance(vec1, vec2):
     return np.linalg.norm(np.array(vec1) - np.array(vec2))
-
-# Redefining get_face_embedding just in case the try/except above skipped it
-if 'detector' in locals():
-    def get_face_embedding(cv2_img):
-        """Detects face and computes the 128D embedding."""
-        if not predictor or not face_recognizer: 
-            logger.error("Face recognition models not loaded")
-            return None
-        try:
-            rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-            faces = detector(rgb_img, 1) 
-            
-            if len(faces) == 0: 
-                logger.warning("No faces detected in image")
-                return None
-                
-            face = faces[0] 
-            shape = predictor(rgb_img, face)
-            embedding = face_recognizer.compute_face_descriptor(rgb_img, shape)
-            embedding_array = np.array(embedding)
-            
-            logger.info(f"Generated embedding - Shape: {embedding_array.shape}")
-            return embedding_array
-            
-        except Exception as e:
-            logger.error(f"❌ ERROR during Dlib embedding generation: {e}")
-            return None
 
 # --- Email Functions ---
 def send_email(recipient_email, recipient_name, profile_link):
@@ -403,31 +511,36 @@ def api_rooms():
 
 @app.route('/register')
 def register_page():
+    employees_list = []
     if db_ref is None:
         logger.error("Database is not initialized. Cannot retrieve employee list.")
-        employees_list = []
     else:
-        employees_ref = db_ref.child("employees")
-        employees_data = employees_ref.get() or {}
-        employees_list = []
-        
-        for emp_id, emp_data in employees_data.items():
-            employees_list.append({
-                'id': emp_id,
-                'name': emp_data.get('name', 'Unknown'),
-                'email': emp_data.get('email', ''),
-                'department': emp_data.get('department', '')
-            })
-    
+        try:
+            employees_ref = db_ref.child("employees")
+            employees_data = employees_ref.get() or {}
+            for emp_id, emp_data in employees_data.items():
+                employees_list.append({
+                    'id': emp_id,
+                    'name': emp_data.get('name', 'Unknown'),
+                    'email': emp_data.get('email', ''),
+                    'department': emp_data.get('department', '')
+                })
+        except NotFoundError:
+            logger.warning("Firebase Realtime Database returned 404. Create the database in Firebase Console (Build → Realtime Database → Create Database) and use the URL shown there.")
+            employees_list = []
+        except Exception as e:
+            logger.error(f"Error fetching employees for register page: {e}")
+            employees_list = []
     return render_template('register.html', employees=employees_list)
 
 @app.route('/employees', methods=["GET"])
 def get_employees():
+    if db_ref is None:
+        return jsonify([])
     try:
         employees_data = db_ref.child("employees").get()
         if not employees_data:
             return jsonify([])
-
         employees_list = []
         for emp_id, emp_info in employees_data.items():
             employees_list.append({
@@ -435,11 +548,13 @@ def get_employees():
                 "name": emp_info.get("name", "Unknown"),
                 "department": emp_info.get("department", "N/A")
             })
-
         return jsonify(employees_list)
+    except NotFoundError:
+        logger.warning("Firebase 404: Realtime Database may not exist. Create it in Firebase Console (Build → Realtime Database → Create Database).")
+        return jsonify([])
     except Exception as e:
         logger.error(f"Error fetching employees: {e}")
-        return jsonify({"error": "Failed to fetch employees"}), 500
+        return jsonify([])
 
 @app.route('/register', methods=['POST'])
 def finalize_registration():
@@ -481,7 +596,10 @@ def finalize_registration():
 
         # ONLY set requires_employee_approval to True when purpose is to meet employee
         if purpose_type == "meetEmployee" and employee_id:
-            employee_data = db_ref.child(f"employees/{employee_id}").get()
+            try:
+                employee_data = db_ref.child(f"employees/{employee_id}").get()
+            except NotFoundError:
+                employee_data = None
             if employee_data:
                 employee_name = employee_data.get('name')
                 employee_email = employee_data.get('email')
@@ -518,14 +636,27 @@ def finalize_registration():
             logger.error(f"Error saving photo: {e}")
             return jsonify({"success": False, "message": "Failed to save photo"}), 500
 
-        # Generate face embedding
+        # Generate face embedding; store photo either way (gate uses QR when no embedding)
         try:
             np_img = np.frombuffer(base64.b64decode(photo_base64), np.uint8)
             cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+            if cv2_img is None:
+                return jsonify({
+                    "success": False,
+                    "message": "Invalid image. Please capture your photo again using the camera."
+                }), 400
+            h, w = cv2_img.shape[:2]
+            if w * h < 10000:
+                return jsonify({
+                    "success": False,
+                    "message": "Image too small. Please ensure your face is clearly visible in the camera frame."
+                }), 400
             embedding_array = get_face_embedding(cv2_img)
-            if embedding_array is None:
-                return jsonify({"success": False, "message": "No face detected in photo"}), 400
-            embedding_str = " ".join(map(str, embedding_array.flatten().tolist()))
+            if embedding_array is not None:
+                embedding_str = " ".join(map(str, embedding_array.flatten().tolist()))
+            else:
+                embedding_str = ""
+                logger.info("No face detected; storing photo only (gate will use QR for this visitor)")
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             return jsonify({"success": False, "message": "Face analysis failed"}), 500
@@ -546,60 +677,68 @@ def finalize_registration():
             "profile_link": profile_link
         }
         
-        # Create new visitor with basic_info
-        db_ref.child(f"visitors/{visitor_id}/basic_info").set(base_data)
-        logger.info(f"✅ NEW VISITOR CREATED: {name} with ID: {visitor_id}")
-
-        # ✅ Create new visit record with employee approval logic
-        visit_id = str(int(time() * 1000))
-        
-        # Determine initial status and approval based on whether employee approval is needed
-        initial_status = "Pending Approval" if requires_employee_approval else "Registered"
-        is_approved = not requires_employee_approval  # Auto-approved if no employee approval needed
-        
-        visit_data = {
-            "visit_id": visit_id,
-            "purpose": purpose,
-            "employee_id": employee_id,
-            "employee_name": employee_name if employee_name else "N/A",
-            "duration": duration,
-            "visit_date": visit_date if visit_date else datetime.now().strftime('%Y-%m-%d'),
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "check_in_time": None,
-            "check_out_time": None,
-            "time_spent": None,
-            "status": initial_status,  # "Pending Approval" for employee meetings, "Registered" for others
-            "visit_approved": is_approved,  # False for employee meetings, True for others
-            "has_visited": False,
-            "requires_employee_approval": requires_employee_approval,  # CRITICAL: Only True for employee meetings
-            "employee_notified": False,  # Will be updated after email sent
-            "employee_actions": [],  # Initialize empty actions array for tracking decisions
-            "room_id": data.get("room_id") or ""  # Meeting room (from Admin meeting_rooms)
-        }
-
-        # Save the visit under visitor
-        db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").set(visit_data)
-        logger.info(f"✅ NEW VISIT CREATED under visitor {visitor_id} - Status: {initial_status}")
-
-        # ✅ GENERATE QR CODE for this visit
-        effective_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
+        # Create new visitor and visit in Firebase (may raise NotFoundError if Realtime Database not created)
         try:
-            qr_token, qr_payload, qr_image, qr_firebase = _create_qr_for_visit(
-                visitor_id, visit_id, effective_visit_date
-            )
-            # Merge QR data into the visit record
-            db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").update(qr_firebase)
-            logger.info(f"✅ QR code generated for visit {visit_id}")
-        except Exception as qr_exc:
-            logger.error(f"⚠️ QR generation failed (non-fatal): {qr_exc}")
-            qr_image = None
+            # Create new visitor with basic_info
+            db_ref.child(f"visitors/{visitor_id}/basic_info").set(base_data)
+            logger.info(f"✅ NEW VISITOR CREATED: {name} with ID: {visitor_id}")
 
-        # Update root visitor status based on whether approval is needed
-        root_status = "Pending Approval" if requires_employee_approval else "Registered"
-        db_ref.child(f"visitors/{visitor_id}").update({
-            "status": root_status,
-            "last_visit_id": visit_id
-        })
+            # ✅ Create new visit record with employee approval logic
+            visit_id = str(int(time() * 1000))
+            
+            # Determine initial status and approval based on whether employee approval is needed
+            initial_status = "Pending Approval" if requires_employee_approval else "Registered"
+            is_approved = not requires_employee_approval  # Auto-approved if no employee approval needed
+            
+            visit_data = {
+                "visit_id": visit_id,
+                "purpose": purpose,
+                "employee_id": employee_id,
+                "employee_name": employee_name if employee_name else "N/A",
+                "duration": duration,
+                "visit_date": visit_date if visit_date else datetime.now().strftime('%Y-%m-%d'),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "check_in_time": None,
+                "check_out_time": None,
+                "time_spent": None,
+                "status": initial_status,  # "Pending Approval" for employee meetings, "Registered" for others
+                "visit_approved": is_approved,  # False for employee meetings, True for others
+                "has_visited": False,
+                "requires_employee_approval": requires_employee_approval,  # CRITICAL: Only True for employee meetings
+                "employee_notified": False,  # Will be updated after email sent
+                "employee_actions": [],  # Initialize empty actions array for tracking decisions
+                "room_id": data.get("room_id") or ""  # Meeting room (from Admin meeting_rooms)
+            }
+
+            # Save the visit under visitor
+            db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").set(visit_data)
+            logger.info(f"✅ NEW VISIT CREATED under visitor {visitor_id} - Status: {initial_status}")
+
+            # ✅ GENERATE QR CODE for this visit
+            effective_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
+            try:
+                qr_token, qr_payload, qr_image, qr_firebase = _create_qr_for_visit(
+                    visitor_id, visit_id, effective_visit_date
+                )
+                # Merge QR data into the visit record
+                db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").update(qr_firebase)
+                logger.info(f"✅ QR code generated for visit {visit_id}")
+            except Exception as qr_exc:
+                logger.error(f"⚠️ QR generation failed (non-fatal): {qr_exc}")
+                qr_image = None
+
+            # Update root visitor status based on whether approval is needed
+            root_status = "Pending Approval" if requires_employee_approval else "Registered"
+            db_ref.child(f"visitors/{visitor_id}").update({
+                "status": root_status,
+                "last_visit_id": visit_id
+            })
+        except NotFoundError:
+            logger.error("Firebase 404 when saving visitor. Realtime Database may not exist — create it in Firebase Console (Build → Realtime Database → Create Database) and set FIREBASE_DATABASE_URL in .env.")
+            return jsonify({
+                "success": False,
+                "message": "Database unavailable. Create the Realtime Database in Firebase Console (Build → Realtime Database → Create Database), then set FIREBASE_DATABASE_URL in Register_App/.env. See FIREBASE_CREDENTIALS_SETUP.txt."
+            }), 503
 
         # ✅ STORE IN SESSION
         session['current_visitor'] = {
@@ -747,15 +886,17 @@ def check_in():
 
         logger.info(f"Rendering check-in page for {basic_info.get('name', 'Unknown')}")
 
+        # Sensitive data (QR, visit details, visitor info) is sent by email only; do not show on this page
         return render_template(
             "check_in.html",
-            visitor=visitor_data,
-            basic_info=basic_info,
+            visitor=None,
+            basic_info=None,
             email_status=email_status,
             email_message=email_message,
-            recent_visit=recent_visit,
+            recent_visit=None,
             visitor_id=visitor_id,
-            qr_image=qr_image_base64
+            qr_image=None,
+            details_sent_by_email=True,
         )
 
     except Exception as e:
@@ -763,9 +904,13 @@ def check_in():
         return render_template(
             "check_in.html",
             visitor=None,
+            basic_info=None,
             recent_visit=None,
+            visitor_id=None,
+            qr_image=None,
+            details_sent_by_email=True,
             email_status="error",
-            email_message="Error loading visitor data"
+            email_message="Error loading visitor data",
         )
 
 @app.route("/profile/<visitor_id>")

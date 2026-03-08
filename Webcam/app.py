@@ -22,11 +22,12 @@ try:
     import dlib
 except ImportError:
     dlib = None
-    print("❌ CRITICAL ERROR: Dlib not installed. Face recognition disabled.")
+    print("[!] CRITICAL: Dlib not installed. Face recognition disabled.")
 
 # QR Module
 from qr_module import (
     create_qr_for_visit,
+    generate_qr_payload,
     parse_qr_payload, validate_qr_token, update_qr_state, invalidate_qr,
     log_qr_scan, log_security_alert, find_all_face_matches, detect_twin,
     get_qr_state,
@@ -56,6 +57,18 @@ EMAIL_PASSWORD = os.environ.get("EMAIL_PASS")
 
 # --- Data source mode ---
 USE_MOCK_DATA = os.environ.get("USE_MOCK_DATA", "False").lower() == "true"
+
+# --- Firebase client config (for frontend templates, e.g. dashboard) ---
+FIREBASE_CLIENT_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY", "AIzaSyDQ1xKacawkZKz9n12PPJCwhUPIKuHmGqU"),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", "visitor-management-8f5b4.firebaseapp.com"),
+    "databaseURL": os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/"),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", "visitor-management-8f5b4"),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", "visitor-management-8f5b4.firebasestorage.app"),
+    "messagingSenderId": os.environ.get("FIREBASE_MESSAGING_SENDER_ID", "160208135498"),
+    "appId": os.environ.get("FIREBASE_APP_ID", "1:160208135498:web:e4e780440fce692b948db3"),
+    "measurementId": os.environ.get("FIREBASE_MEASUREMENT_ID", "G-FDL9LX0BDG"),
+}
 
 # Logger and db reference
 logger = logging.getLogger(__name__)
@@ -132,6 +145,12 @@ def _mock_embedding(seed):
     return " ".join(f"{v:.6f}" for v in vec.tolist())
 
 
+# Fixed token for demo QR so the same QR works every run (show at /demo-qr).
+DEMO_QR_VISITOR_ID = "visitor_demo_1"
+DEMO_QR_VISIT_ID = "visit_demo_1"
+DEMO_QR_FIXED_TOKEN = "demo_fixed_qr_token_32bytes_url_safe_xxxx"
+
+
 def build_mock_gate_data():
     today = datetime.now().strftime("%Y-%m-%d")
     mock_visitors = {}
@@ -141,7 +160,8 @@ def build_mock_gate_data():
     ]
     for idx, (visitor_id, name, email) in enumerate(demo_people, start=1):
         visit_id = f"visit_demo_{idx}"
-        token, payload, _image_b64, qr_firebase = create_qr_for_visit(visitor_id, visit_id, today)
+        token = DEMO_QR_FIXED_TOKEN if (visitor_id == DEMO_QR_VISITOR_ID) else None
+        token, payload, _image_b64, qr_firebase = create_qr_for_visit(visitor_id, visit_id, today, token=token)
         mock_visitors[visitor_id] = {
             "basic_info": {
                 "name": name,
@@ -176,19 +196,24 @@ def build_mock_gate_data():
 
 
 if USE_MOCK_DATA:
-    print("💡 Webcam running in USE_MOCK_DATA=True mode (in-memory demo data).")
+    print("[*] Webcam running in USE_MOCK_DATA=True mode (in-memory demo data).")
     db_ref = InMemoryDBRef(build_mock_gate_data())
 else:
     if not firebase_admin._apps:
         try:
+            if not os.path.exists("firebase_credentials.json"):
+                raise FileNotFoundError("firebase_credentials.json not found")
             cred = credentials.Certificate("firebase_credentials.json")
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://v-guard-af8af-default-rtdb.firebaseio.com/'
-            })
-            print("✅ Firebase initialized successfully.")
+            database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
+            firebase_admin.initialize_app(cred, {"databaseURL": database_url})
+            print("[OK] Firebase initialized successfully.")
+            db_ref = db.reference()
         except Exception as e:
-            print(f"❌ Error initializing Firebase: {e}. Check firebase_credentials.json.")
-    db_ref = db.reference()
+            print(f"[!] Firebase unavailable ({e}). Using mock data.")
+            USE_MOCK_DATA = True
+            db_ref = InMemoryDBRef(build_mock_gate_data())
+    else:
+        db_ref = db.reference()
 
 
 def db_reference(path=None):
@@ -231,32 +256,146 @@ def l2_distance(vec1, vec2):
             vec1 = vec1.reshape(vec2.shape)
     return np.linalg.norm(vec1 - vec2)
 
-# Dlib Model Initialization
-detector = dlib.get_frontal_face_detector() if dlib else None
-predictor = None 
-face_recognizer = None 
-
+# --- YuNet (primary) + Dlib + OpenCV Haar (same pipeline as Register_App) ---
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+detector = predictor = face_recognizer = _cv_face_cascade = _yunet_detector = None
+_yunet_model_path = None
 if dlib:
     try:
-        predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-        face_recognizer = dlib.face_recognition_model_v1("dlib_face_recognition_resnet_model_v1.dat")
-        print("✅ Dlib Models loaded.")
+        _shape_path = os.path.join(_script_dir, "shape_predictor_68_face_landmarks.dat")
+        _face_model_path = os.path.join(_script_dir, "dlib_face_recognition_resnet_model_v1.dat")
+        detector = dlib.get_frontal_face_detector()
+        predictor = dlib.shape_predictor(_shape_path)
+        face_recognizer = dlib.face_recognition_model_v1(_face_model_path)
+        _cv_face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        _yunet_model_path = os.path.join(_script_dir, "face_detection_yunet_2023mar.onnx")
+        if hasattr(cv2, "FaceDetectorYN") and os.path.isfile(_yunet_model_path):
+            try:
+                _yunet_detector = cv2.FaceDetectorYN.create(_yunet_model_path, "", (320, 320))
+                print("[OK] YuNet + Dlib + Haar loaded (same pipeline as Register_App)")
+            except Exception as e:
+                print(f"[!] YuNet init failed, using dlib+Haar only: {e}")
+                _yunet_detector = None
+        else:
+            if not hasattr(cv2, "FaceDetectorYN"):
+                print("[OK] Dlib + Haar loaded (FaceDetectorYN not available)")
+            elif not os.path.isfile(_yunet_model_path):
+                print(f"[OK] Dlib + Haar loaded (YuNet model not found at {_yunet_model_path})")
+            else:
+                print("[OK] Dlib + Haar loaded")
     except Exception as e:
-        print(f"❌ WARNING: Could not load Dlib models: {e}. Check file paths.")
+        print(f"[!] WARNING: Could not load Dlib models: {e}. Check file paths.")
+
+def _embed_from_bbox(rgb_img, x, y, w, h):
+    """Compute dlib 128D embedding from a face bounding box (e.g. from YuNet)."""
+    if not predictor or not face_recognizer:
+        return None
+    try:
+        dlib_rect = dlib.rectangle(int(x), int(y), int(x + w), int(y + h))
+        shape = predictor(rgb_img, dlib_rect)
+        emb = face_recognizer.compute_face_descriptor(rgb_img, shape)
+        return np.array(emb)
+    except Exception:
+        return None
+
+def _get_face_embedding_at_scale(cv2_img, min_side):
+    """Run full detection pipeline at one scale. min_side=0 means no resize."""
+    if cv2_img is None or cv2_img.size == 0:
+        return None
+    bgr_img = np.ascontiguousarray(cv2_img)
+    rgb_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB))
+    gray_img = np.ascontiguousarray(cv2.cvtColor(cv2_img, cv2.COLOR_BGR2GRAY))
+    h, w = rgb_img.shape[:2]
+    if min_side > 0 and min(h, w) < min_side:
+        scale = min_side / min(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        bgr_img = cv2.resize(bgr_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        rgb_img = cv2.resize(rgb_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        gray_img = cv2.resize(gray_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    bgr_img = np.ascontiguousarray(bgr_img)
+    rgb_img = np.ascontiguousarray(rgb_img)
+    gray_img = np.ascontiguousarray(gray_img)
+    h, w = rgb_img.shape[:2]
+
+    if _yunet_detector is not None:
+        _yunet_detector.setInputSize((w, h))
+        _, dets = _yunet_detector.detect(bgr_img)
+        if dets is not None and dets.shape[0] >= 1:
+            x, y, rw, rh = dets[0, 0], dets[0, 1], dets[0, 2], dets[0, 3]
+            if rw > 0 and rh > 0:
+                out = _embed_from_bbox(rgb_img, x, y, rw, rh)
+                if out is not None:
+                    return out
+        bgr_f = cv2.flip(bgr_img, 1)
+        rgb_f = cv2.flip(rgb_img, 1)
+        _yunet_detector.setInputSize((w, h))
+        _, dets = _yunet_detector.detect(bgr_f)
+        if dets is not None and dets.shape[0] >= 1:
+            x, y, rw, rh = dets[0, 0], dets[0, 1], dets[0, 2], dets[0, 3]
+            if rw > 0 and rh > 0:
+                out = _embed_from_bbox(rgb_f, x, y, rw, rh)
+                if out is not None:
+                    return out
+
+    def try_detect(rgb, gray):
+        for img in (gray, rgb):
+            for upsample in (0, 1, 2, 3, 4):
+                faces = detector(img, upsample)
+                if len(faces) > 0:
+                    face = faces[0]
+                    shape = predictor(rgb, face)
+                    emb = face_recognizer.compute_face_descriptor(rgb, shape)
+                    return np.array(emb)
+        if _cv_face_cascade is not None:
+            for (sf, mn, ms) in [
+                (1.2, 3, (15, 15)), (1.15, 4, (20, 20)),
+                (1.1, 5, (30, 30)), (1.05, 3, (20, 20)),
+            ]:
+                rects = _cv_face_cascade.detectMultiScale(gray, scaleFactor=sf, minNeighbors=mn, minSize=ms)
+                if len(rects) > 0:
+                    x, y, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                    dlib_rect = dlib.rectangle(int(x), int(y), int(x + rw), int(y + rh))
+                    shape = predictor(rgb, dlib_rect)
+                    emb = face_recognizer.compute_face_descriptor(rgb, shape)
+                    return np.array(emb)
+        return None
+
+    out = try_detect(rgb_img, gray_img)
+    if out is not None:
+        return out
+    rgb_f = cv2.flip(rgb_img, 1)
+    gray_f = cv2.flip(gray_img, 1)
+    return try_detect(rgb_f, gray_f)
 
 def get_face_embedding(cv2_img):
-    """Detects face and computes the 128D embedding."""
-    if not predictor or not face_recognizer: return None
+    """Same pipeline as Register_App: multi-scale, YuNet + dlib + Haar."""
+    if not predictor or not face_recognizer or cv2_img is None or cv2_img.size == 0:
+        return None
     try:
-        rgb_img = cv2.cvtColor(cv2_img, cv2.COLOR_BGR2RGB)
-        faces = detector(rgb_img, 1) 
-        if len(faces) == 0: return None
-        face = faces[0] 
-        shape = predictor(rgb_img, face)
-        embedding = face_recognizer.compute_face_descriptor(rgb_img, shape)
-        return np.array(embedding)
+        h, w = cv2_img.shape[:2]
+        max_side = max(h, w)
+        images_to_try = [cv2_img]
+        if max_side > 640:
+            scale = 640.0 / max_side
+            new_w, new_h = int(w * scale), int(h * scale)
+            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(small)
+        if max_side > 480:
+            scale = 480.0 / max_side
+            new_w, new_h = int(w * scale), int(h * scale)
+            small = cv2.resize(cv2_img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            images_to_try.append(small)
+
+        for img in images_to_try:
+            for min_side in (0, 256, 320, 400, 512):
+                out = _get_face_embedding_at_scale(img, min_side)
+                if out is not None:
+                    return out
+        return None
     except Exception as e:
-        print(f"❌ ERROR during Dlib embedding generation: {e}")
+        print(f"[!] ERROR during Dlib embedding generation: {e}")
         return None
 
 def verify_by_distance(live_embedding):
@@ -295,7 +434,7 @@ def verify_by_distance(live_embedding):
                 matched_id = visitor_id
 
         except Exception as e:
-            print(f"⚠️ Warning: skipping embedding for {visitor_id} due to error: {e}")
+            print(f"[!] Warning: skipping embedding for {visitor_id} due to error: {e}")
             continue
 
     # Return matched visitor ID only if distance is below threshold
@@ -479,6 +618,30 @@ def check_for_expiring_visits():
 def checkin_gate():
     """The main interface for automatic check-in/check-out."""
     return render_template("checkin_gate.html")
+
+
+@app.route("/debug_last_frame")
+def debug_last_frame():
+    """Serve the last frame that had no face detected (for debugging)."""
+    debug_path = os.path.join(os.path.dirname(__file__), "debug_frames", "last_no_face.jpg")
+    if not os.path.isfile(debug_path):
+        return "<p>No debug frame saved yet. Use the gate and trigger 'No face detected' once.</p>", 404
+    from flask import send_file
+    return send_file(debug_path, mimetype="image/jpeg")
+
+
+@app.route("/dashboard")
+def dashboard():
+    """Visitor dashboard using Firebase Realtime Database (config from env)."""
+    return render_template("dashboard.html", firebase_config=FIREBASE_CLIENT_CONFIG)
+
+
+@app.route("/demo-qr")
+def demo_qr():
+    """Show a mock QR code that works with the webcam gate (same payload as visitor_demo_1)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    qr_payload = generate_qr_payload(DEMO_QR_VISITOR_ID, DEMO_QR_VISIT_ID, today, DEMO_QR_FIXED_TOKEN)
+    return render_template("demo_qr.html", qr_payload=qr_payload)
 
 
 @app.route("/mock_demo_data")
@@ -773,7 +936,16 @@ def checkin_verify_and_log():
         # ──────────────────────────────────────
         live_embedding = get_face_embedding(cv2_img)
         if live_embedding is None:
-            return jsonify({"status": "waiting", "message": "No face detected. Please position your face clearly.", "distance": 999.0})
+            # Debug: save what we received so you can see why no face was found
+            try:
+                debug_dir = os.path.join(os.path.dirname(__file__), "debug_frames")
+                os.makedirs(debug_dir, exist_ok=True)
+                debug_path = os.path.join(debug_dir, "last_no_face.jpg")
+                cv2.imwrite(debug_path, cv2_img)
+                logger.info("No face detected. Frame saved to %s (shape %s)", debug_path, getattr(cv2_img, "shape", None))
+            except Exception as deb:
+                logger.warning("Could not save debug frame: %s", deb)
+            return jsonify({"status": "waiting", "message": "No face detected. Face the camera directly, move a bit closer, and ensure good lighting.", "distance": 999.0})
 
         if len(live_embedding) != 128:
             return jsonify({"status": "waiting", "message": "Face detection failed. Please try again.", "distance": 999.0})
@@ -788,22 +960,29 @@ def checkin_verify_and_log():
         # ──────────────────────────────────────
         all_visitors = db_ref.child("visitors").get() or {}
 
-        THRESHOLD = 0.6
+        THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))
         TWIN_STRONG = 0.45  # Below this → definitive match, no twin ambiguity
 
         face_matches = find_all_face_matches(live_embedding, all_visitors, threshold=THRESHOLD)
 
         if not face_matches:
+            _, best_distance = verify_by_distance(live_embedding)
             if has_qr:
                 log_security_alert("QR_NO_FACE_MATCH", db_ref,
                                    visitor_id=qr_visitor_id, visit_id=qr_visit_id,
                                    message="QR scanned but face matched no registered visitor")
                 log_qr_scan(qr_visitor_id, qr_visit_id, "rejected", db_ref,
                             reason="face_no_match", ip=client_ip)
+            deny_msg = "No match found. You are not registered in the system."
+            if not has_qr:
+                deny_msg += " If you registered without using the camera, re-register with your face or use your QR code."
+            # If best distance is very high (>2), stored embedding was likely fake (registration had no face)
+            if best_distance < 999.0 and best_distance > 2.0:
+                deny_msg = "Face not recognized. Your face may not have been saved correctly when you registered—please re-register with your face clearly visible in the photo, then try again."
             return jsonify({
                 "status": "denied",
-                "message": "No match found. You are not registered in the system.",
-                "distance": 999.0
+                "message": deny_msg,
+                "distance": best_distance if best_distance < 999.0 else 999.0
             })
 
         best_match = face_matches[0]
@@ -1310,14 +1489,14 @@ def submit_feedback():
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'visitor_id': visitor_id
         })
-        print(f"✅ Feedback stored successfully for visitor {visitor_id}")
+        print(f"[OK] Feedback stored successfully for visitor {visitor_id}")
         
         # Verify storage
         stored_feedbacks = feedback_ref.get()
         print(f"📝 Total feedbacks stored: {len(stored_feedbacks) if stored_feedbacks else 0}")
         
     except Exception as e:
-        print(f"❌ Error storing feedback: {e}")
+        print(f"[!] Error storing feedback: {e}")
         return render_template('feedback_form.html', visitor_id=visitor_id, error="Failed to store feedback. Please try again.")
 
     return render_template('thankyou.html', visitor_id=visitor_id)
@@ -1405,8 +1584,8 @@ if __name__ == "__main__":
     print(f"AUTH_MODE (protocol): {AUTH_MODE} (hybrid | face_only | qr_only)")
     print(f"USE_MOCK_DATA: {USE_MOCK_DATA}")
     if COMPANY_IP:
-        print(f"✅ CHECK-IN IP ENFORCEMENT: {COMPANY_IP}")
+        print(f"[OK] CHECK-IN IP ENFORCEMENT: {COMPANY_IP}")
     else:
-        print("⚠️ WARNING: COMPANY_IP is not set in .env. IP check disabled.")
+        print("[!] WARNING: COMPANY_IP is not set in .env. IP check disabled.")
         
     app.run(host="0.0.0.0", port=5002, debug=True)

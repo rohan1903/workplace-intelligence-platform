@@ -1,3 +1,14 @@
+# Core (required for registration + face recognition)
+Flask
+firebase-admin
+python-dotenv
+opencv-python
+numpy
+qrcode[pil]
+# Face recognition (REQUIRED for project)
+cmake
+dlib
+# Chatbot / optional
 streamlit==1.39.0
 google-generativeai==0.8.3
 google-api-core==2.19.2

@@ -161,7 +161,7 @@
         async function setupCamera() {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+                    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }
                 });
                 video.srcObject = stream;
                 video.onloadedmetadata = () => {
@@ -270,7 +270,7 @@
             context.drawImage(video, 0, 0, canvas.width, canvas.height);
             context.restore();
 
-            const dataURL = canvas.toDataURL('image/jpeg', 0.8);
+            const dataURL = canvas.toDataURL('image/jpeg', 0.95);
 
             // Build payload
             const payload = { image: dataURL };

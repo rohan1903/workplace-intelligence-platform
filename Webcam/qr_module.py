@@ -109,15 +109,18 @@ def generate_qr_image_base64(payload_string):
         return None
 
 
-def create_qr_for_visit(visitor_id, visit_id, visit_date):
+def create_qr_for_visit(visitor_id, visit_id, visit_date, token=None):
     """
     One-call helper: generate everything needed for a visit's QR.
+
+    If token is provided (e.g. for demo), it is used; otherwise a random token is generated.
 
     Returns
     -------
     tuple (token, payload_string, image_base64, firebase_data_dict)
     """
-    token = generate_qr_token()
+    if token is None:
+        token = generate_qr_token()
     payload_string = generate_qr_payload(visitor_id, visit_id, visit_date, token)
     image_base64 = generate_qr_image_base64(payload_string)
 
@@ -369,6 +372,10 @@ def find_all_face_matches(live_embedding, all_visitors, threshold=0.6):
     """
     import numpy as np
 
+    live_flat = np.asarray(live_embedding).flatten()
+    if live_flat.size != 128:
+        return []
+
     matches = []
     for vid, vdata in all_visitors.items():
         basic = vdata.get("basic_info", {})
@@ -377,9 +384,9 @@ def find_all_face_matches(live_embedding, all_visitors, threshold=0.6):
             continue
         try:
             stored = np.array([float(x) for x in emb_str.strip().split()])
-            if len(stored) != len(live_embedding):
+            if stored.size != 128:
                 continue
-            dist = float(np.linalg.norm(live_embedding - stored))
+            dist = float(np.linalg.norm(live_flat - stored))
             if dist <= threshold:
                 matches.append({
                     "visitor_id": vid,

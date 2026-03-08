@@ -608,24 +608,21 @@
         }
 
         // --- Camera Access Initialization ---
-        navigator.mediaDevices.getUserMedia({ video: true })
+        navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } } })
             .then(stream => {
                 video.srcObject = stream;
                 video.addEventListener('loadedmetadata', () => {
                     cameraStatus.style.display = 'none';
-                    // Enable button only after camera is ready and employees are loaded
-                    if (employeeDropdown.options.length > 1) {
-                        registerBtn.disabled = false;
-                    }
+                    registerBtn.disabled = !validateForm();
                 });
             })
             .catch(err => {
                 console.error("Error accessing camera:", err);
                 cameraStatus.innerHTML = '<i class="fas fa-exclamation-circle"></i> Camera access denied or unavailable.';
                 cameraStatus.style.background = 'rgba(239, 35, 60, 0.9)';
-                showMessage("❌ Could not access the camera. Registration disabled.");
+                showMessage("Camera is required for registration. Please allow camera access.");
                 registerBtn.disabled = true;
-                registerBtn.innerHTML = '<i class="fas fa-camera-slash"></i> Camera Not Available';
+                registerBtn.innerHTML = '<i class="fas fa-camera-slash"></i> Camera Required';
             });
 
         // --- Employee Fetching Logic ---
@@ -647,7 +644,8 @@
                 console.error("Error fetching employees:", error);
                 employeeDropdown.innerHTML = '<option value="" disabled selected>Could not load employees</option>';
                 employeeDropdown.disabled = true;
-                showMessage("⚠️ Failed to load employee list from server.");
+                showMessage("⚠️ Failed to load employee list. You can still register with 'Other' purpose.");
+                if (video.srcObject) registerBtn.disabled = !validateForm();
             }
         }
 
@@ -837,9 +835,9 @@
                 isValid = false;
             }
 
-            // 4. Check if camera stream is active (only if button is not already disabled for camera error)
-            if (!registerBtn.disabled && !video.srcObject) {
-                 isValid = false; // This shouldn't be needed if camera check is good, but good safeguard
+            // 4. Camera required for face capture
+            if (!video.srcObject) {
+                isValid = false;
             }
 
             return isValid;
@@ -861,9 +859,8 @@
         
         // This is the function that controls the button's overall state
         regForm.addEventListener('input', () => {
-            // Re-run full validation on input to enable/disable button
-            if (video.srcObject) { // Only enable if camera is ready
-                const formValid = validateForm();
+            const formValid = validateForm();
+            if (video.srcObject) {
                 registerBtn.disabled = !formValid;
             }
         });
@@ -901,7 +898,7 @@
             submitBtn.disabled = true;
 
             try {
-                // Capture photo from camera
+                // Capture photo from camera (face required for registration)
                 const canvas = document.createElement("canvas");
                 canvas.width = video.videoWidth || 640;
                 canvas.height = video.videoHeight || 480;

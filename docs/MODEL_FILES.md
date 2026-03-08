@@ -1,5 +1,9 @@
 # Model Files Setup
 
+**For face recognition (required for this project):** See **[FACE_RECOGNITION_SETUP.md](FACE_RECOGNITION_SETUP.md)** for full steps (install dlib, download and place the two `.dat` files in Register_App and Webcam).
+
+---
+
 ## ⚠️ Important: Large Model Files
 
 Due to GitHub's file size limits (100MB hard limit, 50MB recommended), the following large model files are **NOT** included in this repository:

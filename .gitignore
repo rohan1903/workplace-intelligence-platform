@@ -97,3 +97,6 @@ logs/
 *.png
 !**/templates/**/*.png
 
+# Webcam debug frames (no-face snapshots)
+Webcam/debug_frames/
+

@@ -11,9 +11,8 @@ app = Flask(__name__, static_folder='static')
 try:
     if not firebase_admin._apps:
         cred = credentials.Certificate("firebase_credentials.json")
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': 'https://v-guard-af8af-default-rtdb.firebaseio.com/'
-    })# <-- Replace with your actual URL
+        database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
+        firebase_admin.initialize_app(cred, {"databaseURL": database_url})
     print("✅ Firebase Realtime Database initialized successfully.")
 except Exception as e:
     print(f"❌ Firebase initialization error: {e}")

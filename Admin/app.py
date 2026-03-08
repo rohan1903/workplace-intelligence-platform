@@ -3,6 +3,8 @@ import uuid
 import smtplib
 import random
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, jsonify, make_response
 import pandas as pd
 from dotenv import load_dotenv
@@ -44,7 +46,8 @@ except Exception as e:
 # --------------------------
 # Environment & Flask Setup
 # --------------------------
-load_dotenv()
+_admin_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_admin_dir, ".env"))
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "default_secret_for_testing")
 app.config['UPLOAD_FOLDER'] = 'UPLOADS'
@@ -60,9 +63,8 @@ if FIREBASE_AVAILABLE and not USE_MOCK_DATA:
     try:
         if os.path.exists("firebase_credentials.json"):
             cred = credentials.Certificate("firebase_credentials.json")
-            firebase_admin.initialize_app(cred, {
-                'databaseURL': 'https://v-guard-af8af-default-rtdb.firebaseio.com/'
-            })
+            database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
+            firebase_admin.initialize_app(cred, {"databaseURL": database_url})
             print("[OK] Firebase initialized successfully - Using REAL data")
         else:
             USE_MOCK_DATA = True
@@ -125,6 +127,120 @@ def send_notification_email(recipient_email, subject, body):
         return True
     except Exception:
         return False
+
+
+def _qr_image_bytes_from_payload(payload_string):
+    """Generate QR code PNG bytes from payload string. Returns bytes or None."""
+    try:
+        import qrcode
+        qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
+        qr.add_data(payload_string)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def send_qr_checkin_email(recipient_email, visitor_name, checkin_link, qr_payload=None, visit_details=None):
+    """Send visitor an email with full check-in content (QR + visit details). Sensitive data is only in email, not on the check-in page.
+    visit_details: dict with purpose, duration, visit_date, status, employee_name (optional).
+    Returns (True, None) on success, (False, reason_string) on failure."""
+    if not recipient_email or str(recipient_email).strip() in ("", "N/A"):
+        return False, "No visitor email address"
+    if not (SENDER_EMAIL and SENDER_PASS):
+        return False, "SMTP not configured (set EMAIL_USER and EMAIL_PASS in Admin/.env)"
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "Your visit is approved – QR code & check-in details"
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = recipient_email
+
+    qr_img_cid = "qrcode1"
+    qr_block = ""
+    qr_image_part = None
+    if qr_payload:
+        qr_bytes = _qr_image_bytes_from_payload(qr_payload)
+        if qr_bytes:
+            qr_image_part = MIMEImage(qr_bytes, _subtype="png")
+            qr_image_part.add_header("Content-ID", f"<{qr_img_cid}>")
+            qr_image_part.add_header("Content-Disposition", "inline", filename="qrcode.png")
+            qr_block = """
+            <p style="margin: 16px 0 8px 0;"><strong>Your gate pass QR code (show at the gate):</strong></p>
+            <p style="margin: 8px 0 16px 0;"><img src="cid:qrcode1" alt="QR Code" style="max-width: 220px; height: auto; border: 2px solid #ddd; border-radius: 8px;" /></p>
+            <p style="font-size: 13px; color: #555;">Scan this at the gate kiosk. Max 2 scans (check-in + checkout). Do not share this QR with anyone.</p>
+            """
+
+    vd = visit_details or {}
+    purpose = vd.get("purpose", "Not specified")
+    duration = vd.get("duration", "Not specified")
+    visit_date = vd.get("visit_date", "—")
+    status = vd.get("status", "Approved")
+    employee_name = vd.get("employee_name", "N/A")
+    visit_block = f"""
+    <table style="width: 100%; border-collapse: collapse; margin: 16px 0; background: #f8fafc; border-radius: 8px; overflow: hidden;">
+        <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Purpose</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{purpose}</td></tr>
+        <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Duration</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{duration}</td></tr>
+        <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Visit date</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{visit_date}</td></tr>
+        <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Status</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{status}</td></tr>
+        <tr><td style="padding: 10px 14px; font-weight: 600; color: #475569;">Employee</td><td style="padding: 10px 14px;">{employee_name}</td></tr>
+    </table>
+    """
+
+    html = f"""
+    <html><body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h2 style="color: #2563eb;">Visit approved – your check-in details</h2>
+            <p>Hello <strong>{visitor_name}</strong>,</p>
+            <p>Your visit has been approved. <strong>Keep this email</strong> — it contains your QR code and visit details. These are not shown on the website for security.</p>
+            <h3 style="color: #1e40af; margin-top: 24px;">Visit details</h3>
+            {visit_block}
+            <h3 style="color: #1e40af; margin-top: 24px;">QR code for the gate</h3>
+            {qr_block}
+            <p style="margin-top: 24px; padding: 12px; background: #fef2f2; border-left: 4px solid #dc2626; border-radius: 6px; font-size: 13px;">
+                <strong>Security:</strong> Do not share this email or your QR code. They are tied to your identity and verified with face recognition at the gate.
+            </p>
+            <p style="margin-top: 20px; font-size: 13px; color: #64748b;">Need help? <a href="{checkin_link}">Open check-in page</a> (no sensitive data is shown there).</p>
+        </div>
+    </body></html>
+    """
+    # Plain-text fallback so the email is never blank
+    plain = f"""Your visit is approved – check-in details
+
+Hello {visitor_name},
+
+Your visit has been approved. Keep this email; it contains your visit details. Your QR code is in the HTML version of this email (or check your gate pass).
+
+Visit details:
+- Purpose: {vd.get('purpose', 'Not specified')}
+- Duration: {vd.get('duration', 'Not specified')}
+- Visit date: {vd.get('visit_date', '—')}
+- Status: {vd.get('status', 'Approved')}
+- Employee: {vd.get('employee_name', 'N/A')}
+
+Security: Do not share this email or your QR code. Use the QR from the HTML version at the gate.
+
+Need help? Open: {checkin_link}
+"""
+    msg.attach(MIMEText(plain, "plain"))
+    # HTML + inline image (client that supports HTML will show this)
+    related = MIMEMultipart("related")
+    related.attach(MIMEText(html, "html"))
+    if qr_image_part:
+        related.attach(qr_image_part)
+    msg.attach(related)
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASS)
+            server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+        print(f"[OK] QR/check-in email sent to {recipient_email}")
+        return True, None
+    except Exception as e:
+        err = str(e)
+        print(f"[!] QR email failed to {recipient_email}: {err}")
+        return False, err
 
 def trigger_invitation(email):
     """Create a unique registration token and send a registration link to the external web app."""
@@ -4121,6 +4237,7 @@ def visitors_list():
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visits</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Blacklist</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                             </tr>
                         </thead>
                         <tbody class="bg-white divide-y divide-gray-200">
@@ -4184,12 +4301,25 @@ def visitors_list():
                                     <a href="{{ url_for('visitor_detail', visitor_id=visitor.id) }}#blacklist" class="text-xs text-blue-600 hover:underline mt-1 inline-block">Add to blacklist</a>
                                     {% endif %}
                                 </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="flex flex-wrap items-center gap-1">
+                                        <a href="/visitor/{{ visitor.id }}" class="inline-flex items-center px-2 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs font-medium">View</a>
+                                        {% if visitor.status == 'Registered' or visitor.status == 'Pending Approval' %}
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'approve')" class="inline-flex items-center px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-medium" title="Approve">Approve</button>
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'reject')" class="inline-flex items-center px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-medium" title="Reject">Reject</button>
+                                        {% elif visitor.status == 'Approved' %}
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'checkin')" class="inline-flex items-center px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-medium" title="Check-in">Check-in</button>
+                                        {% elif visitor.status == 'Checked In' %}
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'checkout')" class="inline-flex items-center px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs font-medium" title="Check-out">Check-out</button>
+                                        {% endif %}
+                                    </div>
+                                </td>
                             </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
-                
+
                 <!-- Pagination -->
                 {% if total_pages > 1 %}
                 <div class="px-6 py-4 border-t border-gray-200 bg-gray-50">
@@ -4236,6 +4366,27 @@ def visitors_list():
                 var params = new URLSearchParams(window.location.search);
                 params.set('page', page);
                 window.location.href = window.location.pathname + '?' + params.toString();
+            }
+            async function listVisitorAction(visitorId, action) {
+                var endpoint = '/visitor/' + encodeURIComponent(visitorId) + '/' + action;
+                var msg = action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : action === 'checkin' ? 'Checked in' : 'Checked out';
+                if (action === 'reject' && !confirm('Reject this visitor?')) return;
+                try {
+                    var r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                    var data = r.ok ? await r.json().catch(function() { return {}; }) : null;
+                    if (r.ok && (data === null || data.success !== false)) {
+                        var fullMsg = msg + ' successfully.';
+                        if (action === 'approve' && data && data.email_sent !== undefined) {
+                            fullMsg += data.email_sent ? ' QR email sent to visitor.' : ' QR email not sent: ' + (data.email_message || 'unknown');
+                        }
+                        alert(fullMsg);
+                        location.reload();
+                    } else {
+                        alert('Error: ' + (data && data.message ? data.message : r.status));
+                    }
+                } catch (e) {
+                    alert('Error: ' + e.message);
+                }
             }
         </script>
     </body>
@@ -4766,7 +4917,8 @@ def _is_visitor_blacklisted(visitor_data):
 
 @app.route('/visitor/<visitor_id>/approve', methods=['POST'])
 def visitor_approve(visitor_id):
-    """Set visitor status to Approved (most recent visit + top-level). Blocked if visitor is blacklisted."""
+    """Set visitor status to Approved (most recent visit + top-level). Blocked if visitor is blacklisted.
+    Sends visitor an email with QR / check-in page link if SMTP is configured."""
     if USE_MOCK_DATA:
         all_visitors = get_mock_visitors()
         data = all_visitors.get(visitor_id)
@@ -4786,7 +4938,38 @@ def visitor_approve(visitor_id):
         if visit_id:
             ref.child('visits').child(visit_id).update({'status': 'Approved'})
         ref.update({'status': 'Approved'})
-        return jsonify({'success': True})
+        # Send QR / check-in link to visitor email (with QR image if payload exists)
+        email_sent = False
+        email_message = None
+        try:
+            basic_info = data.get("basic_info") or {}
+            visitor_email = basic_info.get("contact") or basic_info.get("email") or ""
+            visitor_name = basic_info.get("name", "Visitor")
+            visit_data = (data.get("visits") or {}).get(visit_id) if visit_id else {}
+            qr_payload = visit_data.get("qr_payload")
+            visit_details = {
+                "purpose": visit_data.get("purpose", "Not specified"),
+                "duration": visit_data.get("duration", "Not specified"),
+                "visit_date": visit_data.get("visit_date", "—"),
+                "status": visit_data.get("status", "Approved"),
+                "employee_name": visit_data.get("employee_name", "N/A"),
+            }
+            if visitor_email and str(visitor_email).strip() and str(visitor_email).strip() != "N/A":
+                reg_url = os.getenv("REGISTRATION_APP_URL", "http://localhost:5001").rstrip("/")
+                checkin_link = f"{reg_url}/check_in?visitor_id={visitor_id}"
+                email_sent, email_message = send_qr_checkin_email(
+                    visitor_email, visitor_name, checkin_link,
+                    qr_payload=qr_payload, visit_details=visit_details
+                )
+            else:
+                email_message = "No visitor email on file"
+        except Exception as mail_err:
+            email_message = str(mail_err)
+        return jsonify({
+            'success': True,
+            'email_sent': email_sent,
+            'email_message': email_message or ("QR email sent to visitor" if email_sent else None)
+        })
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
 
@@ -4967,9 +5150,12 @@ def visitor_detail(visitor_id):
     
     # Get photo information - use photo_url from basic_info
     photo_url = basic_info.get('photo_url', '')
-    
-    # Construct image path - use photo_url directly as it's already the correct path
-    image_path = photo_url if photo_url else None
+    # Photos are served by Register_App; use full URL so Admin (different port) can load them
+    if photo_url and str(photo_url).startswith('/'):
+        registration_base = os.getenv('REGISTRATION_APP_URL', 'http://localhost:5001').rstrip('/')
+        image_path = registration_base + photo_url
+    else:
+        image_path = photo_url if photo_url else None
     
     # Get visits collection
     visits = visitor_data.get('visits', {})
@@ -5179,6 +5365,27 @@ def visitor_detail(visitor_id):
             .detail-modal-box .modal-actions .btn-danger:hover { background: #b91c1c; }
         </style>
         <script>
+            async function doVisitorAction(visitorId, action) {
+                var endpoint = '/visitor/' + encodeURIComponent(visitorId) + '/' + action;
+                var msg = action === 'approve' ? 'Approve' : action === 'reject' ? 'Reject' : action === 'checkin' ? 'Check-in' : 'Check-out';
+                if (action === 'reject' && !confirm('Reject this visitor? You can add a reason on the next screen.')) return;
+                try {
+                    var r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                    var data = r.ok ? await r.json().catch(function() { return {}; }) : null;
+                    if (r.ok && (data === null || data.success !== false)) {
+                        var fullMsg = msg + ' successful.';
+                        if (action === 'approve' && data && data.email_sent !== undefined) {
+                            fullMsg += data.email_sent ? ' QR email sent to visitor.' : ' QR email not sent: ' + (data.email_message || 'unknown');
+                        }
+                        showNotification(fullMsg, 'success');
+                        setTimeout(function() { location.reload(); }, 800);
+                    } else {
+                        showNotification('Error: ' + (data && data.message ? data.message : r.status), 'error');
+                    }
+                } catch (e) {
+                    showNotification('Error: ' + e.message, 'error');
+                }
+            }
             async function doBlacklistAction(visitorId, blacklisted, reason) {
                 try {
                     const r = await fetch('/blacklist/' + encodeURIComponent(visitorId), {
@@ -5339,6 +5546,7 @@ def visitor_detail(visitor_id):
                         <div class="bg-white rounded-xl px-6 py-3 shadow-lg border">
                             {% set status_config = {
                                 'Registered': {'color': 'gray', 'icon': 'user-plus', 'text': 'text-gray-700'},
+                                'Pending Approval': {'color': 'gray', 'icon': 'clock', 'text': 'text-gray-700'},
                                 'Approved': {'color': 'yellow', 'icon': 'check-circle', 'text': 'text-yellow-700'},
                                 'Checked In': {'color': 'green', 'icon': 'user-check', 'text': 'text-green-700'},
                                 'Checked Out': {'color': 'purple', 'icon': 'user-times', 'text': 'text-purple-700'},
@@ -5510,11 +5718,35 @@ def visitor_detail(visitor_id):
                                 Quick Actions
                             </h4>
                             <div class="space-y-3">
+                                {% if visitor.status == 'Registered' or visitor.status == 'Pending Approval' %}
+                                <button type="button" onclick="doVisitorAction('{{ visitor.id|e }}', 'approve')"
+                                        class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                    <i class="fas fa-check-circle mr-2"></i> Approve
+                                </button>
+                                <button type="button" onclick="doVisitorAction('{{ visitor.id|e }}', 'reject')"
+                                        class="w-full bg-red-600 hover:bg-red-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                    <i class="fas fa-times-circle mr-2"></i> Reject
+                                </button>
+                                {% elif visitor.status == 'Approved' %}
+                                <button type="button" onclick="doVisitorAction('{{ visitor.id|e }}', 'checkin')"
+                                        class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                    <i class="fas fa-sign-in-alt mr-2"></i> Check-in
+                                </button>
+                                {% elif visitor.status == 'Checked In' %}
+                                <button type="button" onclick="doVisitorAction('{{ visitor.id|e }}', 'checkout')"
+                                        class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                    <i class="fas fa-sign-out-alt mr-2"></i> Check-out
+                                </button>
+                                {% endif %}
                                 <button onclick="window.print()"
                                         class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
                                     <i class="fas fa-print mr-2"></i> Print Record
                                 </button>
-                                
+                                <a href="{{ registration_app_url }}/check_in?visitor_id={{ visitor.id }}"
+                                   target="_blank"
+                                   class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center text-center">
+                                    <i class="fas fa-qrcode mr-2"></i> View QR / Check-in page
+                                </a>
                                 <button onclick="window.location.href='/visitors'"
                                         class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
                                     <i class="fas fa-arrow-left mr-2"></i> Back to Visitors
@@ -5621,7 +5853,8 @@ def visitor_detail(visitor_id):
     </body>
     </html>
     """
-    return render_template_string(DETAIL_HTML, visitor=visitor)
+    registration_app_url = os.getenv('REGISTRATION_APP_URL', 'http://localhost:5001').rstrip('/')
+    return render_template_string(DETAIL_HTML, visitor=visitor, registration_app_url=registration_app_url)
 @app.route('/feedback_analysis')
 def feedback_analysis():
     if USE_MOCK_DATA:

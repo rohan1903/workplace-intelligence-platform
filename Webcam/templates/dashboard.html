@@ -29,17 +29,8 @@
   <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database.js"></script>
 
   <script>
-    // Firebase config
-    const firebaseConfig = {
-      apiKey: "AIzaSyBeQygfqm5iYgIgXp-2wI5or648QA1do0I",
-      authDomain: "v-guard-af8af.firebaseapp.com",
-      databaseURL: "https://v-guard-af8af-default-rtdb.firebaseio.com",
-      projectId: "v-guard-af8af",
-      storageBucket: "v-guard-af8af.appspot.com",
-      messagingSenderId: "912634393462",
-      appId: "1:912634393462:web:2f51b360374cb733d54057",
-      measurementId: "G-9639Z1QL5D"
-    };
+    // Firebase config (from .env via backend)
+    const firebaseConfig = {{ firebase_config | tojson }};
 
     // Initialize Firebase
     const app = firebase.initializeApp(firebaseConfig);
