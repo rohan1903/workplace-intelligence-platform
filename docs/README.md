@@ -4,6 +4,7 @@ Start here for all project documentation.
 
 | Document | Purpose |
 |----------|---------|
+| [ABSTRACT.md](ABSTRACT.md) | Project abstract — summary for papers, reports, proposals |
 | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Directory layout, entry points, config |
 | [Hybrid_Face_QR_Protocol.md](Hybrid_Face_QR_Protocol.md) | Hybrid Face–QR protocol specification |
 | [PROJECT_STATUS_AND_RUNBOOKS.md](PROJECT_STATUS_AND_RUNBOOKS.md) | Status and runbooks |
