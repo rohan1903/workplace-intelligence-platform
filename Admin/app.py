@@ -129,6 +129,76 @@ def send_notification_email(recipient_email, subject, body):
         return False
 
 
+def _send_status_email(recipient_email, subject, paragraphs):
+    """Send a simple HTML + plain-text status email (used for reject/blacklist notifications)."""
+    if not (SENDER_EMAIL and SENDER_PASS):
+        return False
+    if not recipient_email or str(recipient_email).strip() in ("", "N/A"):
+        return False
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = SENDER_EMAIL
+    msg["To"] = recipient_email
+
+    safe_paragraphs = [str(p) for p in (paragraphs or []) if str(p).strip()]
+    if not safe_paragraphs:
+        safe_paragraphs = ["This is an automated notification from the visitor management system."]
+
+    html_body = "<html><body>" + "".join(f"<p>{p}</p>" for p in safe_paragraphs) + "</body></html>"
+    text_body = "\n\n".join(safe_paragraphs)
+
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASS)
+            server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+        return True
+    except Exception:
+        return False
+
+
+def send_rejection_notification_email(recipient_email, visitor_name, reason=None):
+    """Notify a visitor that their visit has been rejected."""
+    name = visitor_name or "Visitor"
+    paragraphs = [
+        f"Hello {name},",
+        "",
+        "Your visit request has been rejected.",
+    ]
+    if reason:
+        paragraphs.append(f"Reason: {reason}")
+    paragraphs.extend(
+        [
+            "",
+            "If you believe this is a mistake, please contact your host or the reception/security team.",
+        ]
+    )
+    return _send_status_email(recipient_email, "Your visit has been rejected", paragraphs)
+
+
+def send_blacklist_notification_email(recipient_email, visitor_name, reason=None):
+    """Notify a visitor that they have been added to the blacklist."""
+    name = visitor_name or "Visitor"
+    paragraphs = [
+        f"Hello {name},",
+        "",
+        "You have been added to the visitor blacklist and future visit requests will be automatically rejected.",
+    ]
+    if reason:
+        paragraphs.append(f"Reason: {reason}")
+    paragraphs.extend(
+        [
+            "",
+            "If you believe this is a mistake, please contact security or the admin team.",
+        ]
+    )
+    return _send_status_email(recipient_email, "You have been blacklisted from visits", paragraphs)
+
+
 def _qr_image_bytes_from_payload(payload_string):
     """Generate QR code PNG bytes from payload string. Returns bytes or None."""
     try:
@@ -175,7 +245,21 @@ def send_qr_checkin_email(recipient_email, visitor_name, checkin_link, qr_payloa
     vd = visit_details or {}
     purpose = vd.get("purpose", "Not specified")
     duration = vd.get("duration", "Not specified")
-    visit_date = vd.get("visit_date", "—")
+    # Ensure visit date is formatted as dd-mm-yyyy for email display
+    raw_visit_date = vd.get("visit_date", "—")
+    visit_date = raw_visit_date
+    if isinstance(raw_visit_date, str) and raw_visit_date not in ("", "—"):
+        try:
+            # Accept ISO format from DB and already-formatted dd-mm-yyyy; prefer dd-mm-yyyy in output
+            if "-" in raw_visit_date:
+                # Try ISO first
+                try:
+                    dt = datetime.strptime(raw_visit_date, "%Y-%m-%d")
+                except ValueError:
+                    dt = datetime.strptime(raw_visit_date, "%d-%m-%Y")
+                visit_date = dt.strftime("%d-%m-%Y")
+        except Exception:
+            visit_date = raw_visit_date
     status = vd.get("status", "Approved")
     employee_name = vd.get("employee_name", "N/A")
     visit_block = f"""
@@ -4872,6 +4956,17 @@ def toggle_blacklist(visitor_id):
 
         basic_info_ref.update(update_payload)
 
+        # Send blacklist notification email when adding to blacklist (not when removing)
+        if blacklisted:
+            try:
+                visitor_snapshot = visitor_ref.get() or {}
+                basic_info = visitor_snapshot.get('basic_info') or {}
+                visitor_email = basic_info.get('contact') or basic_info.get('email')
+                visitor_name = basic_info.get('name', 'Visitor')
+                send_blacklist_notification_email(visitor_email, visitor_name, reason)
+            except Exception as e:
+                print(f"[!] Error sending blacklist notification email: {e}")
+
         return jsonify({
             'success': True,
             'message': f'Visitor {"blacklisted" if blacklisted else "unblacklisted"} successfully'
@@ -4947,10 +5042,21 @@ def visitor_approve(visitor_id):
             visitor_name = basic_info.get("name", "Visitor")
             visit_data = (data.get("visits") or {}).get(visit_id) if visit_id else {}
             qr_payload = visit_data.get("qr_payload")
+
+            # Normalize visit_date from DB (stored as YYYY-MM-DD) to dd-mm-yyyy for emails
+            raw_date = visit_data.get("visit_date", "—")
+            formatted_date = raw_date
+            if isinstance(raw_date, str) and raw_date not in ("", "—"):
+                try:
+                    dt = datetime.strptime(raw_date, "%Y-%m-%d")
+                    formatted_date = dt.strftime("%d-%m-%Y")
+                except Exception:
+                    formatted_date = raw_date
+
             visit_details = {
                 "purpose": visit_data.get("purpose", "Not specified"),
                 "duration": visit_data.get("duration", "Not specified"),
-                "visit_date": visit_data.get("visit_date", "—"),
+                "visit_date": formatted_date,
                 "status": visit_data.get("status", "Approved"),
                 "employee_name": visit_data.get("employee_name", "N/A"),
             }
@@ -4961,6 +5067,15 @@ def visitor_approve(visitor_id):
                     visitor_email, visitor_name, checkin_link,
                     qr_payload=qr_payload, visit_details=visit_details
                 )
+                # Mark on the visit that a QR/check-in email was sent successfully
+                if email_sent and not USE_MOCK_DATA and FIREBASE_AVAILABLE and visit_id:
+                    try:
+                        db.reference(f"visitors/{visitor_id}/visits/{visit_id}").update({
+                            "qr_email_sent": True,
+                            "qr_email_sent_at": datetime.utcnow().isoformat()
+                        })
+                    except Exception as flag_err:
+                        print(f"[!] Failed to set qr_email_sent flag: {flag_err}")
             else:
                 email_message = "No visitor email on file"
         except Exception as mail_err:
@@ -4976,7 +5091,7 @@ def visitor_approve(visitor_id):
 
 @app.route('/visitor/<visitor_id>/reject', methods=['POST'])
 def visitor_reject(visitor_id):
-    """Set visitor status to Rejected."""
+    """Set visitor status to Rejected and notify them via email."""
     if USE_MOCK_DATA:
         return jsonify({'success': True})
     try:
@@ -4984,10 +5099,33 @@ def visitor_reject(visitor_id):
         data = ref.get()
         if not data:
             return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+
+        # Optional rejection reason from JSON body (if provided by UI)
+        rejection_reason = None
+        if request.is_json:
+            try:
+                payload = request.get_json() or {}
+                rejection_reason = (payload.get('reason') or '').strip() or None
+            except Exception:
+                rejection_reason = None
+
         visit_id, _ = _get_most_recent_visit_id(data)
         if visit_id:
-            ref.child('visits').child(visit_id).update({'status': 'Rejected'})
+            updates = {'status': 'Rejected'}
+            if rejection_reason:
+                updates['rejection_reason'] = rejection_reason
+            ref.child('visits').child(visit_id).update(updates)
         ref.update({'status': 'Rejected'})
+
+        # Send rejection email
+        try:
+            basic_info = data.get('basic_info') or {}
+            visitor_email = basic_info.get('contact') or basic_info.get('email')
+            visitor_name = basic_info.get('name', 'Visitor')
+            send_rejection_notification_email(visitor_email, visitor_name, rejection_reason)
+        except Exception as mail_err:
+            print(f"[!] Failed to send rejection email: {mail_err}")
+
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500

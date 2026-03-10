@@ -893,33 +893,101 @@ def finalize_registration():
             logger.error(f"Error generating embedding: {e}")
             return jsonify({"success": False, "message": "Face analysis failed"}), 500
 
-        # ✅ CREATE NEW VISITOR
-        visitor_id = str(int(time() * 1000))
-        profile_link = request.url_root.rstrip("/") + url_for('profile_page', visitor_id=visitor_id)
-        
-        base_data = {
-            "name": name,
-            "contact": email,
-            "photo_filename": filename,
-            "photo_url": photo_url,
-            "photo_path": filepath,
-            "embedding": embedding_str,
-            "blacklisted": "no",
-            "registered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "profile_link": profile_link
-        }
-        
-        # Create new visitor and visit in Firebase (may raise NotFoundError if Realtime Database not created)
+        # ✅ CREATE OR REUSE VISITOR (email-based)
+        visitor_id = None
+        existing_basic = None
+        is_blacklisted = False
+
+        if db_ref is not None and email:
+            try:
+                all_visitors = db_ref.child("visitors").get() or {}
+                for vid, vdata in all_visitors.items():
+                    bi = (vdata or {}).get("basic_info", {})
+                    if str(bi.get("contact", "")).strip().lower() == str(email).strip().lower():
+                        visitor_id = vid
+                        existing_basic = bi
+                        break
+            except Exception as lookup_err:
+                logger.warning(f"Error looking up existing visitor by email: {lookup_err}")
+
+        if visitor_id is None:
+            # No existing visitor with this email – create a new one
+            visitor_id = str(int(time() * 1000))
+            profile_link = request.url_root.rstrip("/") + url_for('profile_page', visitor_id=visitor_id)
+            base_data = {
+                "name": name,
+                "contact": email,
+                "photo_filename": filename,
+                "photo_url": photo_url,
+                "photo_path": filepath,
+                "embedding": embedding_str,
+                "blacklisted": "no",
+                "registered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "profile_link": profile_link
+            }
+        else:
+            # Reuse existing visitor record for this email, updating embedding and photo
+            is_blacklisted = str(existing_basic.get("blacklisted", "no")).lower() in ("yes", "true", "1")
+            profile_link = existing_basic.get("profile_link") or (
+                request.url_root.rstrip("/") + url_for('profile_page', visitor_id=visitor_id)
+            )
+            base_data = {
+                "name": name,
+                "contact": email,
+                "photo_filename": filename,
+                "photo_url": photo_url,
+                "photo_path": filepath,
+                "embedding": embedding_str,
+                "registered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "profile_link": profile_link,
+            }
+
+        # If this email belongs to an already blacklisted visitor, block new registrations
+        if is_blacklisted:
+            logger.warning(f"Blocked registration attempt for blacklisted visitor {visitor_id} ({email}).")
+            try:
+                blacklist_reason = (existing_basic or {}).get("blacklist_reason", "Security restriction")
+                if email:
+                    subject = "Your visit has been rejected – you are blacklisted"
+                    body_lines = [
+                        f"Hello {name},",
+                        "",
+                        "Our records show that you have been placed on the visitor blacklist,",
+                        "so new visit registrations cannot be created for you.",
+                    ]
+                    if blacklist_reason:
+                        body_lines.append(f"Reason: {blacklist_reason}")
+                    body_lines.extend(
+                        [
+                            "",
+                            "If you believe this is a mistake, please contact security or reception.",
+                        ]
+                    )
+                    body = "\n".join(body_lines)
+                    send_custom_email(email, subject, body)
+            except Exception as mail_err:
+                logger.error(f"Error sending blacklist rejection email: {mail_err}")
+
+            return jsonify({
+                "success": False,
+                "message": "You are blacklisted and cannot register new visits. Please contact security or reception."
+            }), 403
+
+        # Create or update visitor and create visit in Firebase (may raise NotFoundError if Realtime Database not created)
         try:
-            # Create new visitor with basic_info
-            db_ref.child(f"visitors/{visitor_id}/basic_info").set(base_data)
-            logger.info(f"✅ NEW VISITOR CREATED: {name} with ID: {visitor_id}")
+            # Create or update visitor basic_info
+            db_ref.child(f"visitors/{visitor_id}/basic_info").update(base_data)
+            logger.info(f"✅ VISITOR RECORD SAVED: {name} with ID: {visitor_id}")
 
             # ✅ Create new visit record with employee approval logic
             visit_id = str(int(time() * 1000))
             
             # Determine initial status and approval based on whether employee approval is needed
-            initial_status = "Pending Approval" if requires_employee_approval else "Registered"
+            if is_blacklisted:
+                initial_status = "Blacklisted"
+                is_approved = False
+            else:
+                initial_status = "Pending Approval" if requires_employee_approval else "Registered"
             is_approved = not requires_employee_approval  # Auto-approved if no employee approval needed
             
             visit_data = {
@@ -946,21 +1014,28 @@ def finalize_registration():
             db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").set(visit_data)
             logger.info(f"✅ NEW VISIT CREATED under visitor {visitor_id} - Status: {initial_status}")
 
-            # ✅ GENERATE QR CODE for this visit
-            effective_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
-            try:
-                qr_token, qr_payload, qr_image, qr_firebase = _create_qr_for_visit(
-                    visitor_id, visit_id, effective_visit_date
-                )
-                # Merge QR data into the visit record
-                db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").update(qr_firebase)
-                logger.info(f"✅ QR code generated for visit {visit_id}")
-            except Exception as qr_exc:
-                logger.error(f"⚠️ QR generation failed (non-fatal): {qr_exc}")
-                qr_image = None
+            # ✅ GENERATE QR CODE for this visit (skip if visitor is blacklisted)
+            qr_image = None
+            if not is_blacklisted:
+                effective_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
+                try:
+                    qr_token, qr_payload, qr_image, qr_firebase = _create_qr_for_visit(
+                        visitor_id, visit_id, effective_visit_date
+                    )
+                    # Merge QR data into the visit record
+                    db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").update(qr_firebase)
+                    logger.info(f"✅ QR code generated for visit {visit_id}")
+                except Exception as qr_exc:
+                    logger.error(f"⚠️ QR generation failed (non-fatal): {qr_exc}")
+                    qr_image = None
+            else:
+                logger.warning(f"Visitor {visitor_id} is blacklisted; QR generation skipped for visit {visit_id}")
 
-            # Update root visitor status based on whether approval is needed
-            root_status = "Pending Approval" if requires_employee_approval else "Registered"
+            # Update root visitor status based on whether approval is needed or blacklisted
+            if is_blacklisted:
+                root_status = "Blacklisted"
+            else:
+                root_status = "Pending Approval" if requires_employee_approval else "Registered"
             db_ref.child(f"visitors/{visitor_id}").update({
                 "status": root_status,
                 "last_visit_id": visit_id
@@ -1080,7 +1155,11 @@ def check_in():
         logger.info(f"Found {len(visits)} visits for visitor {visitor_id}")
 
         recent_visit = None
-        qr_image_base64 = None
+        latest_status = None
+        latest_requires_approval = False
+        latest_visit_approved = False
+        latest_qr_email_sent = False
+
         if visits:
             # Get the most recent visit (works for both new and returning visitors)
             sorted_visits = sorted(visits.items(), key=lambda x: x[0], reverse=True)
@@ -1089,25 +1168,23 @@ def check_in():
                 latest_visit_id, latest_visit_data = sorted_visits[0]
                 logger.info(f"Latest visit ID: {latest_visit_id}, Purpose: {latest_visit_data.get('purpose')}")
                 
+                latest_status = latest_visit_data.get("status", "Registered")
+                latest_requires_approval = latest_visit_data.get("requires_employee_approval", False)
+                latest_visit_approved = latest_visit_data.get("visit_approved", False)
+                latest_qr_email_sent = latest_visit_data.get("qr_email_sent", False)
+
                 recent_visit = {
                     "purpose": latest_visit_data.get("purpose", "Not specified"),
                     "duration": latest_visit_data.get("duration", "Not specified"),
                     "visit_date": latest_visit_data.get("visit_date", "Unknown"),
                     "employee_name": latest_visit_data.get("employee_name", "N/A"),
-                    "status": latest_visit_data.get("status", "Registered"),
+                    "status": latest_status,
                     "employee_id": latest_visit_data.get("employee_id", None),
-                    "visit_approved": latest_visit_data.get("visit_approved", False),
-                    "has_visited": latest_visit_data.get("has_visited", False)
+                    "visit_approved": latest_visit_approved,
+                    "has_visited": latest_visit_data.get("has_visited", False),
+                    "requires_employee_approval": latest_requires_approval,
+                    "qr_email_sent": latest_qr_email_sent,
                 }
-
-                # ✅ Regenerate QR image from stored payload
-                stored_payload = latest_visit_data.get("qr_payload")
-                if stored_payload:
-                    try:
-                        qr_image_base64 = _generate_qr_image_base64(stored_payload)
-                    except Exception as qr_exc:
-                        logger.error(f"QR image regen failed: {qr_exc}")
-                        qr_image_base64 = None
 
         # Store visitor_id in session for future use
         session["visitor_id"] = visitor_id
@@ -1116,8 +1193,16 @@ def check_in():
         email_status = session.get("email_status", "unknown")
         email_message = session.get("email_message", "")
 
-        # When email was skipped (e.g. returning user + env vars missing), show QR on page so user can get it
-        show_qr_on_page = email_status == "skipped"
+        # Never show QR on the web page; QR is delivered only via email from Admin.
+        show_qr_on_page = False
+
+        # Derive high-level visit state for template messaging
+        status_lower = (latest_status or "").strip().lower() if latest_status else ""
+        is_pending = status_lower in ("pending approval", "pending_approval") or (
+            latest_requires_approval and not latest_visit_approved
+        )
+        is_rejected = status_lower == "rejected"
+        has_qr_email = bool(latest_qr_email_sent)
         visitor_for_template = {"basic_info": basic_info} if basic_info else None
 
         logger.info(f"Rendering check-in page for {basic_info.get('name', 'Unknown')}")
@@ -1130,8 +1215,13 @@ def check_in():
             email_message=email_message,
             recent_visit=recent_visit if show_qr_on_page else None,
             visitor_id=visitor_id,
-            qr_image=qr_image_base64 if show_qr_on_page and qr_image_base64 else None,
-            details_sent_by_email=not show_qr_on_page,
+            qr_image=None,
+            details_sent_by_email=True,
+            visit_status=latest_status,
+            is_pending=is_pending,
+            is_rejected=is_rejected,
+            has_qr_email=has_qr_email,
+            requires_employee_approval=latest_requires_approval,
         )
 
     except Exception as e:
@@ -1385,10 +1475,10 @@ def employee_action_reject(visitor_id):
         
         # Update the visit status in Firebase
         visit_ref = db.reference(f'visitors/{visitor_id}/visits/{visit_id}')
-        
+
         # Get current visit data
         visit_data = visit_ref.get() or {}
-        
+
         # Update the visit status and rejection reason
         updates = {
             'status': 'rejected',
@@ -1397,18 +1487,44 @@ def employee_action_reject(visitor_id):
             'rejected_at': datetime.utcnow().isoformat(),
             'last_updated': datetime.utcnow().isoformat()
         }
-        
+
         # Merge updates with existing data
         visit_data.update(updates)
         visit_ref.update(updates)
-        
+
         # Also update the main visitor's last_visit status
         visitor_ref = db.reference(f'visitors/{visitor_id}')
         visitor_ref.update({
             'last_visit_status': 'rejected',
             'last_updated': datetime.utcnow().isoformat()
         })
-        
+
+        # Send rejection notification email to the visitor
+        try:
+            visitor_snapshot = visitor_ref.get() or {}
+            basic_info = visitor_snapshot.get("basic_info", {}) or {}
+            visitor_email = basic_info.get("contact") or basic_info.get("email")
+            visitor_name = basic_info.get("name", "Visitor")
+            if visitor_email:
+                subject = "Your visit request has been rejected"
+                body_lines = [
+                    f"Hello {visitor_name},",
+                    "",
+                    "Your visit request has been rejected by your host.",
+                ]
+                if rejection_reason:
+                    body_lines.append(f"Reason: {rejection_reason}")
+                body_lines.extend(
+                    [
+                        "",
+                        "If you believe this is a mistake, please contact your host or reception.",
+                    ]
+                )
+                body = "\n".join(body_lines)
+                send_custom_email(visitor_email, subject, body)
+        except Exception as mail_err:
+            logger.error(f"Error sending visit rejection email: {mail_err}")
+
         return jsonify({
             'status': 'success',
             'message': 'Visit rejected successfully'
@@ -1484,6 +1600,61 @@ def verify_page():
     return render_template('verify.html')
 
 
+@app.route("/verify_email", methods=["GET", "POST"])
+def verify_email_page():
+    """
+    Email-first entry point for returning visitors.
+    Step 1: Ask for email, look up matching visitor, store candidate visitor_id in session.
+    Step 2: Redirect to standard face verification flow (/verify) which will be restricted to this visitor.
+    """
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip()
+        if not email:
+            return render_template("verify_email.html", error="Please enter your email address.")
+        if db_ref is None:
+            logger.error("Database not connected during verify_email_page")
+            return render_template("verify_email.html", error="System error. Please try again later.")
+        try:
+            all_visitors = db_ref.child("visitors").get() or {}
+        except Exception as e:
+            logger.error(f"Error reading visitors in verify_email_page: {e}")
+            return render_template("verify_email.html", error="Could not look up your email. Please try again.")
+
+        matches = []
+        for vid, vdata in all_visitors.items():
+            bi = (vdata or {}).get("basic_info", {})
+            if str(bi.get("contact", "")).strip().lower() == email.lower():
+                matches.append((vid, bi))
+
+        if not matches:
+            logger.info(f"No visitor found for email {email} in verify_email_page")
+            return render_template("verify_email.html", error="No visitor found with this email. Please register as a new visitor.", email=email)
+
+        # If multiple matches, pick the most recently registered one by registered_at
+        def _parse_registered_at(basic_info):
+            ts = basic_info.get("registered_at")
+            if not ts:
+                return datetime.min
+            try:
+                return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return datetime.min
+
+        chosen_id, chosen_basic = sorted(
+            matches,
+            key=lambda tup: _parse_registered_at(tup[1]),
+            reverse=True,
+        )[0]
+
+        session["expected_visitor_id"] = chosen_id
+        session["returning_email"] = email
+        logger.info(f"verify_email_page matched email {email} to visitor {chosen_id}")
+        # Proceed to standard face verification which will now be restricted to this visitor
+        return redirect("/verify")
+
+    return render_template("verify_email.html")
+
+
 @app.route("/debug_session")
 def debug_session():
     """Diagnostic: check if session has visitor_id (for returning visitor flow)."""
@@ -1519,64 +1690,257 @@ def verify_face():
             logger.error(f"Invalid embedding dimension: {len(live_embedding)} (expected 128)")
             return jsonify({"match": False, "message": "Face detection failed"})
         
-        # ---- Compare with all visitors using basic_info.embedding ----
-        all_visitors = db_ref.child("visitors").get() or {}
+        # ---- Compare with either a specific expected visitor or all visitors ----
+        expected_id = session.get("expected_visitor_id")
         matched_id, min_distance = None, float('inf')
-        visitor_count = 0
-        valid_embeddings = 0
-
-        logger.info(f"Total visitors in DB for verification: {len(all_visitors)}")
-
-        for vid, vdata in all_visitors.items():
-            visitor_count += 1
-            # Get embedding from basic_info section
-            basic_info = vdata.get("basic_info", {})
-            emb_str = basic_info.get("embedding")
-            
-            if not emb_str:
-                continue
-            
-            try:
-                # Parse the embedding string to numpy array
-                stored_emb = np.array([float(x) for x in emb_str.strip().split()])
-                valid_embeddings += 1
-                
-                # Ensure embeddings have the same dimensions
-                if len(stored_emb) != len(live_embedding):
-                    logger.warning(f"Embedding dimension mismatch for visitor {vid}: stored={len(stored_emb)}, live={len(live_embedding)}")
-                    continue
-                
-                # Calculate Euclidean distance
-                dist = np.linalg.norm(live_embedding - stored_emb)
-                
-                if dist < min_distance:
-                    min_distance = dist
-                    matched_id = vid
-                    
-            except Exception as e:
-                logger.error(f"Error processing embedding for visitor {vid}: {e}")
-                continue
-
-        logger.info(f"Verification summary: {visitor_count} visitors checked, {valid_embeddings} valid embeddings, best distance: {min_distance:.4f}")
 
         THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))  # 0.65 more lenient for real-world
+        TWIN_GAP = 0.08  # if two matches are within this, treat as ambiguous
+
+        if expected_id:
+            logger.info(f"Restricted verification to expected visitor_id={expected_id}")
+            visitor_data = db_ref.child(f"visitors/{expected_id}").get() or {}
+            basic_info = visitor_data.get("basic_info", {})
+            emb_str = basic_info.get("embedding")
+            if emb_str:
+                try:
+                    stored_emb = np.array([float(x) for x in emb_str.strip().split()])
+                    if len(stored_emb) == len(live_embedding):
+                        expected_dist = np.linalg.norm(live_embedding - stored_emb)
+                        min_distance = expected_dist
+                        matched_id = expected_id
+                    else:
+                        logger.warning(
+                            f"Embedding dimension mismatch for expected visitor {expected_id}: "
+                            f"stored={len(stored_emb)}, live={len(live_embedding)}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error processing embedding for expected visitor {expected_id}: {e}")
+                    expected_dist = float("inf")
+            else:
+                logger.warning(f"No embedding stored for expected visitor {expected_id}")
+                expected_dist = float("inf")
+
+            # Twin-aware blacklist check: compare live face against all blacklisted visitors too.
+            all_visitors = db_ref.child("visitors").get() or {}
+            min_blacklisted_dist = float("inf")
+            closest_blacklisted_id = None
+            for vid, vdata in all_visitors.items():
+                basic = (vdata or {}).get("basic_info", {}) or {}
+                raw_bl = basic.get("blacklisted", vdata.get("blacklisted", "no"))
+                is_bl = raw_bl is True or (
+                    isinstance(raw_bl, str) and raw_bl.strip().lower() in ("yes", "true", "1")
+                )
+                if not is_bl:
+                    continue
+                emb_str_bl = basic.get("embedding")
+                if not emb_str_bl:
+                    continue
+                try:
+                    stored_bl = np.array([float(x) for x in emb_str_bl.strip().split()])
+                    if len(stored_bl) != len(live_embedding):
+                        continue
+                    dist_bl = np.linalg.norm(live_embedding - stored_bl)
+                    if dist_bl < min_blacklisted_dist:
+                        min_blacklisted_dist = dist_bl
+                        closest_blacklisted_id = vid
+                except Exception as e:
+                    logger.error(f"Error processing embedding for blacklisted visitor {vid}: {e}")
+                    continue
+
+            logger.info(
+                f"Expected visitor distance={expected_dist:.4f}, "
+                f"closest blacklisted distance={min_blacklisted_dist:.4f} (id={closest_blacklisted_id})"
+            )
+
+            if expected_dist <= THRESHOLD:
+                # If a blacklisted face is as close or closer than the expected visitor within a small margin,
+                # treat the situation as ambiguous/unsafe and deny without revealing blacklist status.
+                if (
+                    closest_blacklisted_id is not None
+                    and min_blacklisted_dist <= expected_dist + TWIN_GAP
+                ):
+                    logger.warning(
+                        "Ambiguous match between expected visitor and a blacklisted visitor. "
+                        "Denying returning registration for safety."
+                    )
+                    return jsonify(
+                        {
+                            "match": False,
+                            "redirect": None,
+                            "message": (
+                                "We could not confidently verify your identity. "
+                                "Please contact reception or register as a new visitor."
+                            ),
+                            "distance": round(float(expected_dist), 4),
+                        }
+                    )
+
+                # Safe to treat as the expected (non-ambiguous) visitor
+                matched_id = expected_id
+                min_distance = expected_dist
+            else:
+                matched_id = None
+                min_distance = expected_dist
+
+        else:
+            # No expected visitor from email: search all visitors and keep top matches for twin/blacklist handling.
+            all_visitors = db_ref.child("visitors").get() or {}
+            visitor_count = 0
+            valid_embeddings = 0
+            candidates = []  # list of dicts: {id, dist, is_blacklisted, name}
+
+            logger.info(f"Total visitors in DB for verification: {len(all_visitors)}")
+
+            for vid, vdata in all_visitors.items():
+                visitor_count += 1
+                basic_info = (vdata or {}).get("basic_info", {}) or {}
+                emb_str = basic_info.get("embedding")
+                if not emb_str:
+                    continue
+
+                try:
+                    stored_emb = np.array([float(x) for x in emb_str.strip().split()])
+                    if len(stored_emb) != len(live_embedding):
+                        logger.warning(
+                            f"Embedding dimension mismatch for visitor {vid}: "
+                            f"stored={len(stored_emb)}, live={len(live_embedding)}"
+                        )
+                        continue
+
+                    dist = np.linalg.norm(live_embedding - stored_emb)
+                    valid_embeddings += 1
+
+                    raw_bl = basic_info.get("blacklisted", vdata.get("blacklisted", "no"))
+                    is_bl = raw_bl is True or (
+                        isinstance(raw_bl, str) and raw_bl.strip().lower() in ("yes", "true", "1")
+                    )
+                    candidates.append(
+                        {
+                            "visitor_id": vid,
+                            "distance": float(dist),
+                            "is_blacklisted": is_bl,
+                            "name": basic_info.get("name", "Unknown"),
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Error processing embedding for visitor {vid}: {e}")
+                    continue
+
+            candidates.sort(key=lambda c: c["distance"])
+
+            if candidates:
+                best = candidates[0]
+                min_distance = best["distance"]
+                matched_id = best["visitor_id"]
+                logger.info(
+                    f"Verification summary: {visitor_count} visitors checked, "
+                    f"{valid_embeddings} valid embeddings, best distance: {min_distance:.4f}"
+                )
+            else:
+                logger.info(
+                    f"Verification summary: {visitor_count} visitors checked, "
+                    f"{valid_embeddings} valid embeddings, no candidates."
+                )
+
+            # Twin-aware blacklist behavior for the no-email path.
+            if candidates and min_distance <= THRESHOLD:
+                best = candidates[0]
+                second = candidates[1] if len(candidates) > 1 else None
+
+                if second is not None:
+                    gap = abs(second["distance"] - best["distance"])
+                else:
+                    gap = float("inf")
+
+                # Case A: best is blacklisted and clearly separated from second → treat as blacklisted.
+                if best["is_blacklisted"] and (second is None or gap >= TWIN_GAP):
+                    visitor_name = best["name"]
+                    logger.warning(
+                        f"Blacklisted visitor matched in verify_face (no-email): "
+                        f"{visitor_name} (ID: {best['visitor_id']}), dist={best['distance']:.4f}"
+                    )
+                    return jsonify(
+                        {
+                            "match": False,
+                            "redirect": None,
+                            "message": (
+                                "You have been blacklisted and cannot schedule new visits. "
+                                "Please contact security or reception."
+                            ),
+                            "distance": round(float(best["distance"]), 4),
+                            "visitor_name": visitor_name,
+                        }
+                    )
+
+                # Case B: ambiguity between a blacklisted and non-blacklisted visitor (possible twins)
+                if (
+                    second is not None
+                    and gap < TWIN_GAP
+                    and (best["is_blacklisted"] != second["is_blacklisted"])
+                ):
+                    logger.warning(
+                        "Ambiguous face match between blacklisted and non-blacklisted visitor "
+                        f"(gap={gap:.4f}). Denying access and asking user to contact reception."
+                    )
+                    return jsonify(
+                        {
+                            "match": False,
+                            "redirect": None,
+                            "message": (
+                                "We could not uniquely verify your identity. "
+                                "Please contact reception or register as a new visitor."
+                            ),
+                            "distance": round(float(min_distance), 4),
+                        }
+                    )
 
         if min_distance <= THRESHOLD and matched_id:
-            # Fetch visitor name for logging
+            # Fetch visitor data for logging and final blacklist check (non-ambiguous cases).
             visitor_data = db_ref.child(f"visitors/{matched_id}").get() or {}
             basic_info = visitor_data.get("basic_info", {})
             visitor_name = basic_info.get("name", "Unknown")
-            
+            raw_bl = basic_info.get("blacklisted", visitor_data.get("blacklisted", "no"))
+            is_blacklisted = False
+            if isinstance(raw_bl, bool):
+                is_blacklisted = raw_bl
+            else:
+                is_blacklisted = str(raw_bl).strip().lower() in ("yes", "true", "1")
+
+            if is_blacklisted:
+                logger.warning(f"Blacklisted visitor matched in verify_face: {visitor_name} (ID: {matched_id})")
+                return jsonify(
+                    {
+                        "match": False,
+                        "redirect": None,
+                        "message": (
+                            "You have been blacklisted and cannot schedule new visits. "
+                            "Please contact security or reception."
+                        ),
+                        "distance": round(float(min_distance), 4),
+                        "visitor_name": visitor_name,
+                    }
+                )
+
             session["visitor_id"] = matched_id
-            logger.info(f"Face verified successfully for visitor: {visitor_name} (ID: {matched_id}), distance: {min_distance:.4f}")
-            
-            return jsonify({
-                "match": True, 
-                "redirect": "/old_register", 
-                "message": f"Welcome back {visitor_name}! Verification successful.",
-                "distance": round(float(min_distance), 4),
-                "visitor_name": visitor_name
-            })
+            # Clear expected_visitor_id once we have a successful match
+            if expected_id:
+                session.pop("expected_visitor_id", None)
+                session.pop("returning_email", None)
+            logger.info(
+                f"Face verified successfully for visitor: {visitor_name} (ID: {matched_id}), "
+                f"distance: {min_distance:.4f}"
+            )
+
+            return jsonify(
+                {
+                    "match": True,
+                    "redirect": "/old_register",
+                    "message": f"Welcome back {visitor_name}! Verification successful.",
+                    "distance": round(float(min_distance), 4),
+                    "visitor_name": visitor_name,
+                }
+            )
         else:
             logger.info(f"Face not verified, closest distance: {min_distance:.4f}")
             return jsonify({
@@ -1611,6 +1975,12 @@ def old_register():
     if not visitor_data:
         logger.error(f"Visitor data not found for ID: {visitor_id}")
         return redirect("/verify")
+
+    # Block returning registration for blacklisted visitors
+    basic = visitor_data.get("basic_info", {}) or {}
+    if str(basic.get("blacklisted", "no")).lower() in ("yes", "true", "1"):
+        logger.warning(f"Blacklisted visitor {visitor_id} attempted returning registration.")
+        return render_template("error.html", message="You are blacklisted and cannot schedule new visits. Please contact security or reception.")
 
     # --- Fetch all employees for dropdown ---
     employees_data = db_ref.child("employees").get() or {}

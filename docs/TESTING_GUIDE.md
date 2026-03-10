@@ -614,6 +614,14 @@ Use this checklist for quick testing:
 
 ---
 
+## 🔎 Advanced Edge-Case Testing
+
+For a structured, security-focused test run (twins, spoofing, blacklist, QR/face mismatches, and auth modes), see the dedicated edge-case plan in:
+
+- [`docs/EDGE_CASE_TEST_PLAN.md`](EDGE_CASE_TEST_PLAN.md)
+
+---
+
 ## 🚨 Important Notes
 
 1. **Model Files**: System won't work without dlib model files

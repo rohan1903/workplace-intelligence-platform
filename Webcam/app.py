@@ -912,6 +912,8 @@ def mock_auth():
         return jsonify({"status": "denied", "message": "This visit has been rejected.", "distance": 0.21})
     if visit_status == "rescheduled":
         return jsonify({"status": "denied", "message": "This visit has been rescheduled.", "distance": 0.21})
+    if visit_status in ["pending approval", "pending_approval"]:
+        return jsonify({"status": "denied", "message": "This visit is still pending approval. Please wait for your host or reception to approve it.", "distance": 0.21})
 
     return jsonify({"status": "denied", "message": f"Unsupported visit status: {visit_status}", "distance": 0.21})
 

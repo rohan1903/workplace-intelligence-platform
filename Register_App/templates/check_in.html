@@ -475,18 +475,43 @@
 
             <div class="p-8">
                 {% if details_sent_by_email %}
-                <!-- Sensitive data is only in the approval email; this page shows no QR or visit details -->
+                <!-- Message-only view; QR and sensitive details are only in email or at the gate -->
                 <div class="bg-gradient-to-br from-blue-50 to-slate-50 rounded-2xl border-2 border-blue-200 p-8 mb-6">
                     <div class="flex items-center justify-center w-16 h-16 bg-blue-100 rounded-2xl mx-auto mb-4">
                         <i class="fas fa-envelope-open-text text-3xl text-blue-600"></i>
                     </div>
-                    <h3 class="text-xl font-bold text-gray-800 text-center mb-3">Check-in details sent to your email</h3>
-                    <p class="text-gray-600 text-center mb-4">
-                        Your QR code, visit details, and gate instructions have been sent to your email. They are not shown on this page for security.
+
+                    {% if is_pending %}
+                        <h3 class="text-xl font-bold text-gray-800 text-center mb-3">Your visit is pending approval</h3>
+                        <p class="text-gray-600 text-center mb-4">
+                            Your registration has been received and is waiting for host approval. You will receive an email with check-in instructions once it is approved.
+                        </p>
+                    {% elif is_rejected %}
+                        <h3 class="text-xl font-bold text-gray-800 text-center mb-3">Your visit has been rejected</h3>
+                        <p class="text-gray-600 text-center mb-4">
+                            This visit request was rejected by the host or administrator. Please contact your host or reception if you believe this is a mistake.
+                        </p>
+                    {% elif has_qr_email %}
+                        <h3 class="text-xl font-bold text-gray-800 text-center mb-3">Check-in details sent to your email</h3>
+                        <p class="text-gray-600 text-center mb-4">
+                            Your QR code, visit details, and gate instructions have been sent to your email. They are not shown on this page for security.
+                        </p>
+                        <p class="text-gray-600 text-center text-sm mb-4">
+                            Use the QR code and instructions from that email at the gate. Do not share this link or your email.
+                        </p>
+                    {% else %}
+                        <h3 class="text-xl font-bold text-gray-800 text-center mb-3">Registration complete</h3>
+                        <p class="text-gray-600 text-center mb-4">
+                            Your visit has been registered. If you do not receive a check-in email, please contact your host or the reception desk for gate instructions.
+                        </p>
+                    {% endif %}
+
+                    {% if email_status == 'skipped' %}
+                    <p class="text-red-600 text-center text-sm mb-4">
+                        Email delivery is not configured on this system. Please contact your host or reception to obtain your gate pass.
                     </p>
-                    <p class="text-gray-600 text-center text-sm mb-6">
-                        Use the QR code and instructions from that email at the gate. Do not share this link or your email.
-                    </p>
+                    {% endif %}
+
                     <a href="/" 
                        class="flex items-center justify-center space-x-3 bg-gray-500 hover:bg-gray-600 text-white px-6 py-4 rounded-xl font-semibold transition-all duration-200 shadow-lg hover:shadow-xl w-full">
                         <i class="fas fa-home"></i>
@@ -494,33 +519,7 @@
                     </a>
                 </div>
                 {% else %}
-                <!-- Show visitor/visit/QR when email was skipped or legacy flow -->
-                {% if email_status == 'skipped' %}
-                <div class="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-6">
-                    <div class="flex items-center space-x-3 mb-4">
-                        <div class="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center">
-                            <i class="fas fa-envelope-open-text text-amber-600"></i>
-                        </div>
-                        <div>
-                            <h3 class="font-semibold text-amber-800">Email could not be sent</h3>
-                            <p class="text-amber-700 text-sm">Your QR code is shown below. Enter your email to receive a copy by email (if configured).</p>
-                        </div>
-                    </div>
-                    <form id="resend-qr-form" class="flex flex-wrap gap-3 items-end">
-                        <input type="hidden" name="visitor_id" value="{{ visitor_id }}">
-                        <div class="flex-1 min-w-[200px]">
-                            <label class="block text-sm font-medium text-gray-700 mb-1">Email address</label>
-                            <input type="email" name="email" required placeholder="you@example.com"
-                                   class="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                   value="{{ visitor.basic_info.contact if visitor and visitor.basic_info and visitor.basic_info.contact else '' }}">
-                        </div>
-                        <button type="submit" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors">
-                            <i class="fas fa-paper-plane mr-2"></i>Send QR to Email
-                        </button>
-                    </form>
-                    <p id="resend-result" class="mt-3 text-sm hidden"></p>
-                </div>
-                {% endif %}
+                <!-- Visitor profile and visit details (no QR is shown on this page) -->
                 <!-- Visitor Profile Card -->
                 <div class="bg-white rounded-2xl shadow-lg border border-gray-200 p-6 mb-6">
                     <div class="flex items-center space-x-4 mb-4">
@@ -600,51 +599,6 @@
                 </div>
                 {% endif %}
 
-                <!-- QR Code Section -->
-                {% if qr_image %}
-                <div class="bg-gradient-to-br from-slate-50 to-blue-50 rounded-2xl border-2 border-slate-200 p-6 mb-6">
-                    <div class="flex items-center space-x-3 mb-4">
-                        <div class="w-10 h-10 bg-blue-100 rounded-xl flex items-center justify-center">
-                            <i class="fas fa-qrcode text-blue-600"></i>
-                        </div>
-                        <div>
-                            <h3 class="text-lg font-semibold text-slate-800">Your Gate Pass QR Code</h3>
-                            <p class="text-blue-600 text-xs">Required for check-in at the gate</p>
-                        </div>
-                    </div>
-
-                    <div class="bg-white rounded-xl p-4 flex flex-col items-center shadow-inner">
-                        <img id="qr-code-img" src="{{ qr_image }}" alt="Gate Pass QR Code"
-                             class="w-48 h-48 mb-3 border-2 border-gray-200 rounded-lg">
-                        <p class="text-sm text-gray-600 font-medium mb-1">Scan this at the gate kiosk</p>
-                        <p class="text-xs text-gray-400">Max 2 scans allowed (check-in + checkout)</p>
-                    </div>
-
-                    <div class="mt-4 grid grid-cols-2 gap-3">
-                        <button onclick="downloadQR()"
-                                class="flex items-center justify-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold transition-all shadow-md">
-                            <i class="fas fa-download"></i>
-                            <span>Save QR</span>
-                        </button>
-                        <button onclick="screenshotQR()"
-                                class="flex items-center justify-center space-x-2 bg-white hover:bg-gray-50 text-blue-700 border-2 border-blue-300 px-4 py-2.5 rounded-lg text-sm font-semibold transition-all">
-                            <i class="fas fa-copy"></i>
-                            <span>Copy QR</span>
-                        </button>
-                    </div>
-
-                    <div class="mt-3 bg-red-50 border border-red-200 rounded-lg p-3">
-                        <div class="flex items-start space-x-2">
-                            <i class="fas fa-shield-alt text-red-500 mt-0.5"></i>
-                            <p class="text-xs text-red-700">
-                                <strong>Security:</strong> Do not share this QR with anyone.
-                                It is tied to your identity and will be verified with face recognition at the gate.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-                {% endif %}
-
                 <!-- Instructions -->
                 <div class="warning-box rounded-2xl p-4 mb-6">
                     <div class="flex items-center space-x-3">
@@ -652,11 +606,7 @@
                         <div>
                             <h3 class="font-semibold text-orange-800">Important Notice</h3>
                             <p class="text-orange-700">
-                                {% if qr_image %}
-                                    Save your QR code, then proceed to the gate for QR scan + facial verification.
-                                {% else %}
-                                    Please proceed to the physical access gate for facial verification.
-                                {% endif %}
+                                Please proceed to the physical access gate for QR scan and/or facial verification, using the instructions sent to your email or provided by reception.
                             </p>
                         </div>
                     </div>
@@ -697,64 +647,6 @@
                 }, index * 100);
             });
         });
-
-        // ── QR Download / Copy helpers ──
-        function downloadQR() {
-            const img = document.getElementById('qr-code-img');
-            if (!img || !img.src) return;
-            const link = document.createElement('a');
-            link.download = 'gate_pass_qr.png';
-            link.href = img.src;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        }
-
-        async function screenshotQR() {
-            const img = document.getElementById('qr-code-img');
-            if (!img || !img.src) return;
-            try {
-                const resp = await fetch(img.src);
-                const blob = await resp.blob();
-                await navigator.clipboard.write([
-                    new ClipboardItem({ [blob.type]: blob })
-                ]);
-                alert('QR code copied to clipboard!');
-            } catch (err) {
-                // Fallback: open image in new tab
-                window.open(img.src, '_blank');
-            }
-        }
-
-        // Resend QR by email form
-        const resendForm = document.getElementById('resend-qr-form');
-        if (resendForm) {
-            resendForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const btn = resendForm.querySelector('button[type="submit"]');
-                const resultEl = document.getElementById('resend-result');
-                btn.disabled = true;
-                resultEl.classList.add('hidden');
-                try {
-                    const formData = new FormData(resendForm);
-                    const body = { visitor_id: formData.get('visitor_id'), email: formData.get('email') };
-                    const r = await fetch('/resend_qr_email', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body)
-                    });
-                    const data = await r.json();
-                    resultEl.classList.remove('hidden');
-                    resultEl.className = 'mt-3 text-sm ' + (data.success ? 'text-green-700' : 'text-red-700');
-                    resultEl.textContent = data.message;
-                } catch (err) {
-                    resultEl.classList.remove('hidden');
-                    resultEl.className = 'mt-3 text-sm text-red-700';
-                    resultEl.textContent = 'Request failed. Please try again.';
-                }
-                btn.disabled = false;
-            });
-        }
     </script>
 </body>
 </html>
