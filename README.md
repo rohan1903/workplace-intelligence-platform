@@ -240,6 +240,14 @@ cd gate && python app.py           # Port 5002
 
 Place `firebase_credentials.json` in each component directory before starting.
 
+### Showcasing the platform
+
+When demoing the system (e.g. Register + Gate in real time with fresh visitors):
+
+- **Register & Gate:** Use real Firebase (no mock). Register a new visitor with face scan, get approved, then check in/out at the gate so the flow is live.
+- **Admin dashboard:** Run Admin with **`USE_MOCK_DATA=True`** (default). The dashboard then shows rich, stable mock data (visitors, analytics, blacklist, occupancy) so you can showcase all features (filters, search, blacklist, analytics, room management) without pre-populating real data. Mock data is fixed per server run so it does not change on every refresh.
+- **Optional:** To show the same visitors you just registered in the dashboard, run Admin with **`USE_MOCK_DATA=False`** and use the same Firebase project; the dashboard will read live data from Firebase.
+
 ## Key Features
 
 ### Security & Authentication

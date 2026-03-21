@@ -354,7 +354,7 @@ def log_security_alert(alert_type, db_ref, **fields):
         entry = {"alert_type": alert_type, "timestamp": now_str}
         entry.update(fields)
         db_ref.child(f"security_alerts/{key}").set(entry)
-        logger.warning(f"🚨 SECURITY ALERT: {alert_type} | {fields}")
+        logger.warning(f"SECURITY ALERT: {alert_type} | {fields}")
         return True
     except Exception as exc:
         logger.error(f"Error logging security alert: {exc}")

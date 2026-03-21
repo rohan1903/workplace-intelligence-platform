@@ -109,7 +109,7 @@
                 };
             } catch (err) {
                 console.error("Client-side Error: Could not access webcam. Ensure permission is granted.", err);
-                displayMessage("❌ Error accessing webcam. Please allow camera access and try again.", 'error');
+                displayMessage("Error accessing webcam. Please allow camera access and try again.", 'error');
                 verifyButton.disabled = true;
             }
         }
@@ -129,7 +129,7 @@
          */
         async function captureAndVerify() {
             if (!stream) {
-                displayMessage("❌ Webcam not active.", 'error');
+                displayMessage("Webcam not active.", 'error');
                 return;
             }
 
@@ -183,7 +183,7 @@
 
             } catch (error) {
                 console.error('Client-side Network Error:', error);
-                displayMessage('❌ Network Error: Could not connect to the verification server.', 'error');
+                displayMessage('Network error: Could not connect to the verification server.', 'error');
             } finally {
                 verifyButton.disabled = false;
                 verifyButton.textContent = 'Verify Identity';

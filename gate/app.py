@@ -529,7 +529,7 @@ def send_feedback_email(visitor_email, visitor_name, feedback_link):
                     <a href="{feedback_link}" 
                        style="background-color: #3f37c9; color: white; padding: 14px 30px; 
                               text-decoration: none; border-radius: 8px; display: inline-block; font-weight: bold;">
-                        📝 Share Feedback
+                        Share Feedback
                     </a>
                 </div>
 
@@ -553,7 +553,7 @@ def send_feedback_email(visitor_email, visitor_name, feedback_link):
         server.sendmail(EMAIL_ADDRESS, visitor_email, msg.as_string())
         server.quit()
 
-        logger.info(f"✅ Feedback email successfully sent to {visitor_email}")
+        logger.info(f"Feedback email successfully sent to {visitor_email}")
         return True, "Feedback email sent successfully"
 
     except smtplib.SMTPAuthenticationError:
@@ -610,7 +610,7 @@ def send_exceeded_email(visitor_email, visitor_name):
         server.sendmail(EMAIL_ADDRESS, visitor_email, msg.as_string())
         server.quit()
 
-        logger.info(f"✅ Exceeded duration email sent to {visitor_email}")
+        logger.info(f"Exceeded duration email sent to {visitor_email}")
         return True, "Exceeded duration email sent successfully"
 
     except Exception as e:
@@ -621,11 +621,11 @@ def send_exceeded_email(visitor_email, visitor_name):
 def simulate_send_email(recipient_email, subject, body):
     """Simulates sending an email and prints the email content to the console."""
     if recipient_email == 'N/A' or not recipient_email:
-        print(f"📧 SKIPPED EMAIL: No email address provided for notification.")
+        print("SKIPPED EMAIL: No email address provided for notification.")
         return
         
     print("--------------------------------------------------")
-    print(f"📧 SIMULATED EMAIL SENT TO: {recipient_email}")
+    print(f"SIMULATED EMAIL SENT TO: {recipient_email}")
     print(f"SUBJECT: {subject}")
     print(f"BODY:\n{body}")
     print("--------------------------------------------------")
@@ -989,6 +989,21 @@ def checkin_verify_and_log():
             if not qr_valid and qr_error_msg:
                 logger.warning(f"QR validation failed: {qr_error_msg}")
 
+        # Reject wrong / expired / forged QR before face work (hybrid & face_only with bad payload)
+        if raw_qr and not qr_valid:
+            detail = (qr_error_msg or "Unrecognized code").strip()
+            msg = (
+                "This QR code is not valid for check-in or check-out. "
+                f"{detail} "
+                "Use the QR from your visit confirmation email or visitor profile."
+            )
+            return jsonify({
+                "status": "denied",
+                "message": msg,
+                "distance": 999.0,
+                "rescan_qr": True,
+            })
+
         # ──────────────────────────────────────
         # AUTH_MODE qr_only: authenticate by QR only (no face required)
         # ──────────────────────────────────────
@@ -1056,10 +1071,6 @@ def checkin_verify_and_log():
                 result = process_checkin(qr_visitor_id, qr_visit_id, visitor_name, visitor_email,
                                         employee_name, purpose, duration, 0.0, client_ip,
                                         auth_mode="QR_ONLY", has_qr=True, auth_mode_config=AUTH_MODE)
-                resp = result.get_json()
-                if resp and resp.get("status") == "granted" and employee_name and employee_name not in ["N/A", ""]:
-                    return jsonify({"status": "granted", "name": visitor_name, "message": f"{employee_name} approved {visitor_name}'s visit. Arrival successful.",
-                                    "distance": 0.0, "redirect_url": url_for("checkin_success", name=visitor_name, action="checked in")})
                 return result
             elif visit_status.lower() == "rejected":
                 msg = "Your visit has been rejected."
@@ -1167,7 +1178,7 @@ def checkin_verify_and_log():
 
         if is_twin and not has_qr:
             twin_names = ", ".join(m["name"] for m in twin_matches)
-            logger.warning(f"🔀 Twin/ambiguous face detected: {twin_names}")
+            logger.warning(f"Twin/ambiguous face detected: {twin_names}")
             log_security_alert("TWIN_DETECTED", db_ref,
                                candidates=[m["visitor_id"] for m in twin_matches],
                                distances=[round(m["distance"], 4) for m in twin_matches])
@@ -1278,7 +1289,7 @@ def checkin_verify_and_log():
         rejection_reason = target_visit.get("rejection_reason", "")
         new_visit_date = target_visit.get("new_visit_date", "")
 
-        logger.info(f"🔍 Gate: visitor={visitor_name}, visit={visit_id}, "
+        logger.info(f"Gate: visitor={visitor_name}, visit={visit_id}, "
                      f"status={visit_status}, auth={auth_mode}, dist={min_distance:.4f}")
 
         # ──────────────────────────────────────
@@ -1324,15 +1335,6 @@ def checkin_verify_and_log():
             result = process_checkin(visitor_id, visit_id, visitor_name, visitor_email,
                                     employee_name, purpose, duration, min_distance,
                                     client_ip, auth_mode, has_qr, auth_mode_config=AUTH_MODE)
-            resp = result.get_json()
-            if resp and resp.get("status") == "granted" and employee_name and employee_name not in ["N/A", ""]:
-                return jsonify({
-                    "status": "granted",
-                    "name": visitor_name,
-                    "message": f"{employee_name} approved {visitor_name}'s visit. Check-in successful.",
-                    "distance": min_distance,
-                    "redirect_url": url_for("checkin_success", name=visitor_name, action="checked in")
-                })
             return result
 
         # 3. REJECTED
@@ -1482,14 +1484,17 @@ def process_checkin(visitor_id, visit_id, visitor_name, visitor_email,
 
         # ── Build message ──
         if employee_name and employee_name not in ["N/A", ""]:
-            message = f"Successful check-in of {visitor_name}. Meeting with {employee_name}."
+            message = (
+                f"Check-in successful. Welcome, {visitor_name}. "
+                f"Proceed to your meeting with {employee_name}."
+            )
         else:
-            message = f"Successful check-in of {visitor_name}."
+            message = f"Check-in successful. Welcome, {visitor_name}."
         if auth_mode == "FACE_ONLY":
             message += " (Face-only mode)"
 
         log_protocol_event("arrival", auth_mode, visitor_id=visitor_id, visit_id=visit_id, ip=client_ip)
-        logger.info(f"✅ Check-in: {visitor_name}, visit={visit_id}, auth={auth_mode}")
+        logger.info(f"Check-in: {visitor_name}, visit={visit_id}, auth={auth_mode}")
         return jsonify({
             "status": "granted",
             "name": visitor_name,
@@ -1574,7 +1579,7 @@ def process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
                                        message="Visitor checked out via face only; QR was used at check-in but not at checkout",
                                        ip=client_ip)
                     qr_was_invalidated = True
-                    logger.warning(f"⚠️ QR invalidated for {visitor_name} — face-only checkout after QR check-in")
+                    logger.warning(f"QR invalidated for {visitor_name} — face-only checkout after QR check-in")
 
                 elif qr_current == QR_ASSUMED_SCANNED:
                     # Was already face-only at check-in too — no suspicion, just close it
@@ -1620,9 +1625,9 @@ def process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
                 feedback_link = request.url_root.rstrip("/") + url_for("feedback_form", visitor_id=visitor_id)
                 email_sent, _ = send_feedback_email(visitor_email, visitor_name, feedback_link)
                 if email_sent:
-                    logger.info(f"✅ Feedback email sent to {visitor_email}")
+                    logger.info(f"Feedback email sent to {visitor_email}")
             except Exception as e:
-                logger.error(f"❌ Error sending feedback email: {e}")
+                logger.error(f"Error sending feedback email: {e}")
 
             if final_status == "exceeded":
                 send_exceeded_email(visitor_email, visitor_name)
@@ -1636,7 +1641,7 @@ def process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
 
         log_protocol_event("departure", auth_mode, visitor_id=visitor_id, visit_id=visit_id,
                            status=final_status, ip=client_ip)
-        logger.info(f"✅ Checkout: {visitor_name}, visit={visit_id}, "
+        logger.info(f"Checkout: {visitor_name}, visit={visit_id}, "
                      f"status={final_status}, auth={auth_mode}")
 
         return jsonify({

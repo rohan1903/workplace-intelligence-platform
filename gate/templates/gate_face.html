@@ -163,7 +163,7 @@
                 if (data.face_detected) {
                     faceStatusEl.className = 'face-status detected';
                     faceStatusEl.querySelector('.icon').className = 'fas fa-check-circle icon';
-                    faceStatusText.textContent = 'Face detected ✓ Verifying identity...';
+                    faceStatusText.textContent = 'Face detected. Verifying identity...';
                     videoContainer.classList.remove('face-fail');
                     videoContainer.classList.add('face-ok');
                 } else {
@@ -198,7 +198,7 @@
             } catch (err) {
                 console.error('Camera error:', err);
                 messageBox.className = 'message-error mb-4 mx-auto';
-                messageBox.innerHTML = '❌ Cannot access camera. Check permissions.';
+                messageBox.innerHTML = 'Cannot access camera. Check permissions.';
             }
         }
 
@@ -226,7 +226,7 @@
                 isProcessing = false;
                 console.error('Network error:', err);
                 messageBox.className = 'message-error mb-4 mx-auto';
-                messageBox.innerHTML = '❌ Network Error. Cannot connect to server.';
+                messageBox.innerHTML = 'Network error. Cannot connect to server.';
             });
         }
 
@@ -235,7 +235,7 @@
                 sessionStorage.removeItem('gate_action');
                 sessionStorage.removeItem('gate_qr_data');
                 messageBox.className = 'message-success mb-4 mx-auto';
-                messageBox.innerHTML = `✅ ${data.message}`;
+                messageBox.innerHTML = data.message;
                 stopVerifyLoop();
                 if (faceCheckIntervalId) { clearInterval(faceCheckIntervalId); faceCheckIntervalId = null; }
                 setTimeout(() => { window.location.href = data.redirect_url; }, 1500);
@@ -244,7 +244,7 @@
                 sessionStorage.removeItem('gate_action');
                 sessionStorage.removeItem('gate_qr_data');
                 messageBox.className = 'message-checkout mb-4 mx-auto';
-                messageBox.innerHTML = `✅ ${data.message}`;
+                messageBox.innerHTML = data.message;
                 stopVerifyLoop();
                 if (faceCheckIntervalId) { clearInterval(faceCheckIntervalId); faceCheckIntervalId = null; }
                 setTimeout(() => {
@@ -253,10 +253,13 @@
             }
             else if (data.status === 'denied' || data.status === 'error') {
                 messageBox.className = 'message-error mb-4 mx-auto';
-                messageBox.innerHTML = data.message;
-                /* Do NOT redirect when face not recognized - user stays on page to try again */
-                /* Only redirect when server explicitly says to re-scan QR (e.g. QR invalid/expired) */
-                if (data.message && data.message.toLowerCase().includes('scan your qr code')) {
+                messageBox.innerHTML = data.message || 'Access denied.';
+                /* Send user back to scan step when QR was wrong or unusable */
+                if (data.rescan_qr || (data.message && data.message.toLowerCase().includes('not valid for check-in'))) {
+                    sessionStorage.removeItem('gate_action');
+                    sessionStorage.removeItem('gate_qr_data');
+                    setTimeout(() => { window.location.href = '/checkin_gate'; }, 3500);
+                } else if (data.message && data.message.toLowerCase().includes('scan your qr code')) {
                     sessionStorage.removeItem('gate_action');
                     sessionStorage.removeItem('gate_qr_data');
                     setTimeout(() => { window.location.href = '/checkin_gate'; }, 2000);

@@ -1,4 +1,5 @@
 import os
+import sys
 import cv2
 import base64
 import numpy as np
@@ -15,7 +16,13 @@ try:
     import dlib
 except ImportError:
     dlib = None  # Face recognition disabled if dlib not installed (e.g. need CMake on Windows)
+from pathlib import Path
 from dotenv import load_dotenv
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from presentation_demo import DEFAULT_DEPARTMENT_OPTIONS, PRESENTATION_ROOM_OPTIONS
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -40,8 +47,7 @@ logger = logging.getLogger(__name__)
 # --- Load environment ---
 load_dotenv()
 
-# Set OVERRIDE_FACE_REQUIRED=True in .env to allow registration without face (QR-only at gate)
-OVERRIDE_FACE_REQUIRED = os.environ.get("OVERRIDE_FACE_REQUIRED", "false").lower() in ("true", "1", "yes")
+# Face scan is always required for registration; no placeholder/QR-only option.
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "fallback_secret_key")
@@ -84,6 +90,78 @@ except Exception as e:
 
 # Global reference for the database
 db_ref = db.reference() if db_app else None
+
+# --- Visitor / visit policy helpers (registration + returning flow) ---
+
+def _is_blacklisted_flag(raw):
+    if raw is True:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in ("yes", "true", "1"):
+        return True
+    return False
+
+
+def _visitor_basic_is_blacklisted(basic_info, visitor_root=None):
+    raw = (basic_info or {}).get("blacklisted")
+    if raw is None and visitor_root is not None:
+        raw = visitor_root.get("blacklisted", "no")
+    return _is_blacklisted_flag(raw)
+
+
+def _visitor_has_active_check_in(visitor_data):
+    """True if any visit has check_in_time set and check_out_time still empty."""
+    if not visitor_data or not isinstance(visitor_data, dict):
+        return False
+    visits = visitor_data.get("visits") or {}
+    if not isinstance(visits, dict):
+        return False
+    for v in visits.values():
+        if not isinstance(v, dict):
+            continue
+        cin = v.get("check_in_time")
+        cout = v.get("check_out_time")
+        if cin and str(cin).strip():
+            if not cout or not str(cout).strip():
+                return True
+    return False
+
+
+MSG_ACTIVE_CHECK_IN = (
+    "You are already checked in for an active visit. Check out at the gate before registering again."
+)
+MSG_BLACKLISTED = (
+    "You have been blacklisted and cannot schedule new visits. "
+    "Please contact security or reception."
+)
+
+def collect_department_choices():
+    """Sorted unique departments: defaults plus any department strings on employee records."""
+    depts = set(DEFAULT_DEPARTMENT_OPTIONS)
+    if db_ref is not None:
+        try:
+            for ed in (db_ref.child("employees").get() or {}).values():
+                d = (ed or {}).get("department")
+                if d and str(d).strip():
+                    depts.add(str(d).strip())
+        except Exception as ex:
+            logger.warning("Could not load departments from employees: %s", ex)
+    return sorted(depts, key=lambda x: (x.lower(), x))
+
+
+def allowed_department_set():
+    return frozenset(collect_department_choices())
+
+
+def _merge_rooms_for_registration(remote_dict):
+    """Real rooms from Admin first; add presentation rooms if those ids are missing."""
+    out = {}
+    if isinstance(remote_dict, dict):
+        out.update(remote_dict)
+    for room_id, meta in PRESENTATION_ROOM_OPTIONS.items():
+        if room_id not in out:
+            out[room_id] = dict(meta)
+    return out
+
 
 # --- YuNet (primary) + Dlib + OpenCV Haar fallback; no placeholder/mock ---
 _script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -326,7 +404,7 @@ def send_email(recipient_email, recipient_name, profile_link):
         server.sendmail(EMAIL_ADDRESS, recipient_email, msg.as_string())
         server.quit()
         
-        logger.info(f"✅ Profile link email successfully sent to {recipient_email}")
+        logger.info(f"Profile link email successfully sent to {recipient_email}")
         return True, "Email sent successfully"
         
     except smtplib.SMTPAuthenticationError:
@@ -374,7 +452,7 @@ def send_employee_notification(employee_email, employee_name, visitor_data, prof
                     <a href="{profile_url}" 
                        style="background-color: #3f37c9; color: white; padding: 14px 30px; 
                               text-decoration: none; border-radius: 8px; display: inline-block; font-weight: bold;">
-                        🔍 View Visitor Profile
+                        View Visitor Profile
                     </a>
                 </div>
 
@@ -394,7 +472,7 @@ def send_employee_notification(employee_email, employee_name, visitor_data, prof
         server.sendmail(EMAIL_ADDRESS, employee_email, msg.as_string())
         server.quit()
 
-        logger.info(f"✅ Employee notification successfully sent to {employee_email}")
+        logger.info(f"Employee notification successfully sent to {employee_email}")
         return True, "Employee notification sent successfully"
 
     except smtplib.SMTPAuthenticationError:
@@ -445,7 +523,7 @@ def send_custom_email(recipient_email, subject, body):
         server.sendmail(EMAIL_ADDRESS, recipient_email, msg.as_string())
         server.quit()
         
-        logger.info(f"✅ Custom email sent successfully to {recipient_email}")
+        logger.info(f"Custom email sent successfully to {recipient_email}")
         return True
         
     except smtplib.SMTPAuthenticationError:
@@ -544,63 +622,34 @@ def index():
 
 @app.route('/api/rooms')
 def api_rooms():
-    """Return meeting rooms from Admin app (for registration dropdown)."""
-    if not requests:
-        return jsonify({})
-    try:
-        r = requests.get(f"{ADMIN_APP_URL}/api/rooms/list", timeout=5)
-        if r.ok:
-            return jsonify(r.json())
-    except Exception as e:
-        logger.warning(f"Could not fetch rooms from Admin: {e}")
-    return jsonify({})
+    """Return meeting rooms from Admin app plus presentation demo rooms (for registration dropdown)."""
+    remote = {}
+    if requests:
+        try:
+            r = requests.get(f"{ADMIN_APP_URL}/api/rooms/list", timeout=5)
+            if r.ok:
+                j = r.json()
+                if isinstance(j, dict):
+                    remote = j
+        except Exception as e:
+            logger.warning(f"Could not fetch rooms from Admin: {e}")
+    return jsonify(_merge_rooms_for_registration(remote))
 
 @app.route('/register')
 def register_page():
-    employees_list = []
-    if db_ref is None:
-        logger.error("Database is not initialized. Cannot retrieve employee list.")
-    else:
-        try:
-            employees_ref = db_ref.child("employees")
-            employees_data = employees_ref.get() or {}
-            for emp_id, emp_data in employees_data.items():
-                employees_list.append({
-                    'id': emp_id,
-                    'name': emp_data.get('name', 'Unknown'),
-                    'email': emp_data.get('email', ''),
-                    'department': emp_data.get('department', '')
-                })
-        except NotFoundError:
-            logger.warning("Firebase Realtime Database returned 404. Create the database in Firebase Console (Build → Realtime Database → Create Database) and use the URL shown there.")
-            employees_list = []
-        except Exception as e:
-            logger.error(f"Error fetching employees for register page: {e}")
-            employees_list = []
-    return render_template('register.html', employees=employees_list)
+    return render_template('register.html', departments=collect_department_choices())
 
-@app.route('/employees', methods=["GET"])
+
+@app.route('/departments', methods=['GET'])
+def get_departments():
+    """Departments visitors may select (defaults + unique employee departments)."""
+    return jsonify(collect_department_choices())
+
+
+@app.route('/employees', methods=['GET'])
 def get_employees():
-    if db_ref is None:
-        return jsonify([])
-    try:
-        employees_data = db_ref.child("employees").get()
-        if not employees_data:
-            return jsonify([])
-        employees_list = []
-        for emp_id, emp_info in employees_data.items():
-            employees_list.append({
-                "id": emp_id,
-                "name": emp_info.get("name", "Unknown"),
-                "department": emp_info.get("department", "N/A")
-            })
-        return jsonify(employees_list)
-    except NotFoundError:
-        logger.warning("Firebase 404: Realtime Database may not exist. Create it in Firebase Console (Build → Realtime Database → Create Database).")
-        return jsonify([])
-    except Exception as e:
-        logger.error(f"Error fetching employees: {e}")
-        return jsonify([])
+    """Deprecated: registration uses /departments. Returns empty list for old clients."""
+    return jsonify([])
 
 @app.route('/api/debug_detect')
 def api_debug_detect():
@@ -721,8 +770,8 @@ def debug_detect_page():
 
 @app.route('/api/face_required')
 def api_face_required():
-    """Returns whether face detection is required for registration."""
-    return jsonify({"face_required": not OVERRIDE_FACE_REQUIRED})
+    """Returns whether face detection is required for registration (always True)."""
+    return jsonify({"face_required": True})
 
 
 @app.route('/api/face_debug')
@@ -806,35 +855,33 @@ def finalize_registration():
 
         photo_base64 = photo_base64_full.split(",")[1]
 
-        # Handle purpose and employee association
+        # Handle purpose: department visit vs free-text "other"
         purpose_type = data.get("purposeType")
-        employee_id = data.get("employeeSelect")
+        department_choice = (data.get("departmentSelect") or "").strip()
         custom_purpose = data.get("purpose", "Other")
 
         employee_name = None
+        employee_id = None
         employee_data = None
-        requires_employee_approval = False  # Default to false
+        department = ""
+        requires_employee_approval = False
 
-        # ONLY set requires_employee_approval to True when purpose is to meet employee
-        if purpose_type == "meetEmployee" and employee_id:
-            try:
-                employee_data = db_ref.child(f"employees/{employee_id}").get()
-            except NotFoundError:
-                employee_data = None
-            if employee_data:
-                employee_name = employee_data.get('name')
-                employee_email = employee_data.get('email')
-                employee_dept = employee_data.get('department', 'N/A')
-                purpose = f"Meeting with {employee_name} ({employee_dept})"
-                requires_employee_approval = True  # ONLY for employee meetings
-            else:
-                purpose = "Meeting (Employee not found)"
-                employee_id = None
-                requires_employee_approval = False
+        if purpose_type == "meetDepartment":
+            if not department_choice:
+                return jsonify({
+                    "success": False,
+                    "message": "Please select a department from the list.",
+                }), 400
+            allowed = allowed_department_set()
+            if department_choice not in allowed:
+                return jsonify({
+                    "success": False,
+                    "message": "Please select a valid department from the list.",
+                }), 400
+            department = department_choice
+            purpose = f"Visit to {department} department"
         else:
-            # For all other purposes, no employee approval needed
             purpose = custom_purpose
-            requires_employee_approval = False
 
         # Save photo to uploads_reg folder
         try:
@@ -880,22 +927,20 @@ def finalize_registration():
             embedding_array = get_face_embedding(cv2_img)
             if embedding_array is not None:
                 embedding_str = " ".join(map(str, embedding_array.flatten().tolist()))
-            elif OVERRIDE_FACE_REQUIRED:
-                embedding_str = ""
-                logger.warning("No face detected; OVERRIDE_FACE_REQUIRED=True, allowing registration (QR-only at gate)")
             else:
                 logger.warning("No face detected in registration photo")
                 return jsonify({
                     "success": False,
-                    "message": "No face detected in the photo. Please ensure your face is clearly visible, well-lit, and facing the camera directly. Try again in good lighting. (Tip: Add OVERRIDE_FACE_REQUIRED=True to .env to register without face—you'll use QR at the gate.)"
+                    "message": "No face detected in the photo. Please ensure your face is clearly visible, well-lit, and facing the camera directly. Try again in good lighting."
                 }), 400
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             return jsonify({"success": False, "message": "Face analysis failed"}), 500
 
-        # ✅ CREATE OR REUSE VISITOR (email-based)
+        # CREATE OR REUSE VISITOR (email-based)
         visitor_id = None
         existing_basic = None
+        existing_vdata = None
         is_blacklisted = False
 
         if db_ref is not None and email:
@@ -906,6 +951,7 @@ def finalize_registration():
                     if str(bi.get("contact", "")).strip().lower() == str(email).strip().lower():
                         visitor_id = vid
                         existing_basic = bi
+                        existing_vdata = vdata
                         break
             except Exception as lookup_err:
                 logger.warning(f"Error looking up existing visitor by email: {lookup_err}")
@@ -942,6 +988,10 @@ def finalize_registration():
                 "profile_link": profile_link,
             }
 
+        if visitor_id is not None and existing_vdata is not None and _visitor_has_active_check_in(existing_vdata):
+            logger.warning(f"Blocked registration: visitor {visitor_id} already has an active check-in.")
+            return jsonify({"success": False, "message": MSG_ACTIVE_CHECK_IN}), 403
+
         # If this email belongs to an already blacklisted visitor, block new registrations
         if is_blacklisted:
             logger.warning(f"Blocked registration attempt for blacklisted visitor {visitor_id} ({email}).")
@@ -970,16 +1020,16 @@ def finalize_registration():
 
             return jsonify({
                 "success": False,
-                "message": "You are blacklisted and cannot register new visits. Please contact security or reception."
+                "message": MSG_BLACKLISTED,
             }), 403
 
         # Create or update visitor and create visit in Firebase (may raise NotFoundError if Realtime Database not created)
         try:
             # Create or update visitor basic_info
             db_ref.child(f"visitors/{visitor_id}/basic_info").update(base_data)
-            logger.info(f"✅ VISITOR RECORD SAVED: {name} with ID: {visitor_id}")
+            logger.info(f"VISITOR RECORD SAVED: {name} with ID: {visitor_id}")
 
-            # ✅ Create new visit record with employee approval logic
+            # Create new visit record with employee approval logic
             visit_id = str(int(time() * 1000))
             
             # Determine initial status and approval based on whether employee approval is needed
@@ -995,6 +1045,7 @@ def finalize_registration():
                 "purpose": purpose,
                 "employee_id": employee_id,
                 "employee_name": employee_name if employee_name else "N/A",
+                "department": department,
                 "duration": duration,
                 "visit_date": visit_date if visit_date else datetime.now().strftime('%Y-%m-%d'),
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1012,9 +1063,9 @@ def finalize_registration():
 
             # Save the visit under visitor
             db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").set(visit_data)
-            logger.info(f"✅ NEW VISIT CREATED under visitor {visitor_id} - Status: {initial_status}")
+            logger.info(f"NEW VISIT CREATED under visitor {visitor_id} - Status: {initial_status}")
 
-            # ✅ GENERATE QR CODE for this visit (skip if visitor is blacklisted)
+            # GENERATE QR CODE for this visit (skip if visitor is blacklisted)
             qr_image = None
             if not is_blacklisted:
                 effective_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
@@ -1024,9 +1075,9 @@ def finalize_registration():
                     )
                     # Merge QR data into the visit record
                     db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}").update(qr_firebase)
-                    logger.info(f"✅ QR code generated for visit {visit_id}")
+                    logger.info(f"QR code generated for visit {visit_id}")
                 except Exception as qr_exc:
-                    logger.error(f"⚠️ QR generation failed (non-fatal): {qr_exc}")
+                    logger.error(f"QR generation failed (non-fatal): {qr_exc}")
                     qr_image = None
             else:
                 logger.warning(f"Visitor {visitor_id} is blacklisted; QR generation skipped for visit {visit_id}")
@@ -1047,7 +1098,7 @@ def finalize_registration():
                 "message": "Database unavailable. Create the Realtime Database in Firebase Console (Build → Realtime Database → Create Database), then set FIREBASE_DATABASE_URL in registration/.env. See FIREBASE_CREDENTIALS_SETUP.txt."
             }), 503
 
-        # ✅ STORE IN SESSION
+        # STORE IN SESSION
         session['current_visitor'] = {
             'visitor_id': visitor_id,
             'visit_id': visit_id,
@@ -1057,6 +1108,7 @@ def finalize_registration():
             'status': initial_status,
             'photo_url': photo_url,
             'employee_name': employee_name,
+            'department': department,
             'visit_date': visit_date if visit_date else datetime.now().strftime('%Y-%m-%d'),
             'requires_employee_approval': requires_employee_approval
         }
@@ -1069,7 +1121,7 @@ def finalize_registration():
         email_success, email_message = send_email(email, name, profile_link)
         employee_notification_sent = False
 
-        # ✅ ONLY send email notification if it's an employee meeting requiring approval
+        # ONLY send email notification if it's an employee meeting requiring approval
         if requires_employee_approval and employee_data and employee_data.get('email'):
             employee_email = employee_data.get('email')
             profile_url = request.url_root.rstrip("/") + url_for("employee_action", visitor_id=visitor_id)
@@ -1097,12 +1149,14 @@ def finalize_registration():
                     "employee_notified": True,
                     "notification_sent_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
-                logger.info(f"✅ Employee notification sent to {employee_email}")
+                logger.info(f"Employee notification sent to {employee_email}")
             else:
-                logger.error(f"❌ Failed to send employee notification: {emp_message}")
+                logger.error(f"Failed to send employee notification: {emp_message}")
         else:
             employee_notification_sent = False
-            logger.info(f"ℹ️ No employee notification sent (purpose: {purpose_type}, requires_approval: {requires_employee_approval})")
+            logger.info(
+                f"No host notification sent (purpose: {purpose_type}, requires_approval: {requires_employee_approval})"
+            )
 
         response_data = {
             "success": True,
@@ -1118,7 +1172,9 @@ def finalize_registration():
         }
 
         logger.info(f"--- NEW REGISTRATION COMPLETED SUCCESSFULLY FOR {name} ---")
-        logger.info(f"📋 Registration Details: Purpose: {purpose}, Employee Approval Required: {requires_employee_approval}, Status: {initial_status}")
+        logger.info(
+            f"Registration details: purpose={purpose}, employee_approval={requires_employee_approval}, status={initial_status}"
+        )
         return jsonify(response_data)
 
     except Exception as e:
@@ -1653,6 +1709,14 @@ def verify_email_page():
             reverse=True,
         )[0]
 
+        full_chosen = all_visitors.get(chosen_id) or {}
+        if _visitor_basic_is_blacklisted(chosen_basic, full_chosen):
+            logger.warning(f"verify_email_page: blacklisted visitor {chosen_id} attempted returning flow.")
+            return render_template("verify_email.html", error=MSG_BLACKLISTED, email=email)
+        if _visitor_has_active_check_in(full_chosen):
+            logger.warning(f"verify_email_page: visitor {chosen_id} already checked in; blocked returning registration.")
+            return render_template("verify_email.html", error=MSG_ACTIVE_CHECK_IN, email=email)
+
         session["expected_visitor_id"] = chosen_id
         session["returning_email"] = email
         logger.info(f"verify_email_page matched email {email} to visitor {chosen_id}")
@@ -1708,6 +1772,13 @@ def verify_face():
             logger.info(f"Restricted verification to expected visitor_id={expected_id}")
             visitor_data = db_ref.child(f"visitors/{expected_id}").get() or {}
             basic_info = visitor_data.get("basic_info", {})
+            if _visitor_has_active_check_in(visitor_data):
+                return jsonify({
+                    "match": False,
+                    "redirect": None,
+                    "message": MSG_ACTIVE_CHECK_IN,
+                })
+            expected_visitor_blacklisted = _visitor_basic_is_blacklisted(basic_info, visitor_data)
             emb_str = basic_info.get("embedding")
             if emb_str:
                 try:
@@ -1762,6 +1833,18 @@ def verify_face():
             )
 
             if expected_dist <= THRESHOLD:
+                if expected_visitor_blacklisted:
+                    logger.warning(
+                        f"Blacklisted visitor {expected_id} matched face in returning flow; denying."
+                    )
+                    return jsonify(
+                        {
+                            "match": False,
+                            "redirect": None,
+                            "message": MSG_BLACKLISTED,
+                            "distance": round(float(expected_dist), 4),
+                        }
+                    )
                 # If a blacklisted face is as close or closer than the expected visitor within a small margin,
                 # treat the situation as ambiguous/unsafe and deny without revealing blacklist status.
                 if (
@@ -1872,10 +1955,7 @@ def verify_face():
                         {
                             "match": False,
                             "redirect": None,
-                            "message": (
-                                "You have been blacklisted and cannot schedule new visits. "
-                                "Please contact security or reception."
-                            ),
+                            "message": MSG_BLACKLISTED,
                             "distance": round(float(best["distance"]), 4),
                             "visitor_name": visitor_name,
                         }
@@ -1909,11 +1989,7 @@ def verify_face():
             basic_info = visitor_data.get("basic_info", {})
             visitor_name = basic_info.get("name", "Unknown")
             raw_bl = basic_info.get("blacklisted", visitor_data.get("blacklisted", "no"))
-            is_blacklisted = False
-            if isinstance(raw_bl, bool):
-                is_blacklisted = raw_bl
-            else:
-                is_blacklisted = str(raw_bl).strip().lower() in ("yes", "true", "1")
+            is_blacklisted = _is_blacklisted_flag(raw_bl)
 
             if is_blacklisted:
                 logger.warning(f"Blacklisted visitor matched in verify_face: {visitor_name} (ID: {matched_id})")
@@ -1921,10 +1997,7 @@ def verify_face():
                     {
                         "match": False,
                         "redirect": None,
-                        "message": (
-                            "You have been blacklisted and cannot schedule new visits. "
-                            "Please contact security or reception."
-                        ),
+                        "message": MSG_BLACKLISTED,
                         "distance": round(float(min_distance), 4),
                         "visitor_name": visitor_name,
                     }
@@ -1986,23 +2059,20 @@ def returning_visitor():
 
     # Block returning registration for blacklisted visitors
     basic = visitor_data.get("basic_info", {}) or {}
-    if str(basic.get("blacklisted", "no")).lower() in ("yes", "true", "1"):
+    if _visitor_basic_is_blacklisted(basic, visitor_data):
         logger.warning(f"Blacklisted visitor {visitor_id} attempted returning registration.")
-        return render_template("error.html", message="You are blacklisted and cannot schedule new visits. Please contact security or reception.")
+        return render_template("error.html", message=MSG_BLACKLISTED)
 
-    # --- Fetch all employees for dropdown ---
-    employees_data = db_ref.child("employees").get() or {}
-    employees = {}
-    for emp_id, emp in employees_data.items():
-        employees[emp_id] = {
-            "name": emp.get("name", "Unknown"),
-            "department": emp.get("department", "N/A"),
-            "email": emp.get("email", "")  # Include email for notification
-        }
+    if _visitor_has_active_check_in(visitor_data):
+        logger.warning(f"Visitor {visitor_id} already checked in; blocked returning registration form.")
+        return render_template("error.html", message=MSG_ACTIVE_CHECK_IN)
+
+    departments = collect_department_choices()
+    allowed_depts = frozenset(departments)
 
     if request.method == "POST":
-        purpose_type = request.form.get("purpose_type")  # 'employee' or 'other'
-        selected_employee_name = request.form.get("employee_name")  # Get employee name from dropdown
+        purpose_type = request.form.get("purpose_type")  # 'department' or 'other'
+        department_choice = (request.form.get("department") or "").strip()
         other_purpose = request.form.get("other_purpose")
         visit_date = request.form.get("visit_date")
         duration = request.form.get("duration", "Not sure")
@@ -2010,30 +2080,24 @@ def returning_visitor():
         employee_name = None
         employee_email = None
         purpose = "Not specified"
-
-        # Find employee by name instead of ID
         employee_id = None
-        if purpose_type == "employee" and selected_employee_name:
-            employee_found = False
-            for emp_id, emp_data in employees_data.items():
-                if emp_data.get('name') == selected_employee_name:
-                    employee_name = emp_data.get("name", "Unknown")
-                    employee_email = emp_data.get("email")
-                    department = emp_data.get("department", "N/A")
-                    purpose = f"Meeting with {employee_name} ({department})"
-                    employee_id = emp_id
-                    employee_found = True
-                    break
+        department = ""
+        requires_employee_approval = False
 
-            if not employee_found:
-                purpose = f"Meeting with {selected_employee_name} (Employee details not found)"
-                employee_name = selected_employee_name
+        if purpose_type == "department" and department_choice:
+            if department_choice not in allowed_depts:
+                return render_template(
+                    "returning_visitor.html",
+                    visitor=visitor_data,
+                    departments=departments,
+                    error="Please select a valid department.",
+                ), 400
+            department = department_choice
+            purpose = f"Visit to {department} department"
         elif purpose_type == "other":
             purpose = (other_purpose or "").strip() or "Other"
 
-        # Determine if employee approval is needed (same logic as new registration)
-        requires_employee_approval = bool(employee_name and employee_id)
-        initial_status = "Pending Approval" if requires_employee_approval else "Registered"
+        initial_status = "Registered"
         is_approved = not requires_employee_approval
 
         # Update basic visitor info
@@ -2049,6 +2113,7 @@ def returning_visitor():
             "purpose": purpose,
             "employee_id": employee_id,
             "employee_name": employee_name if employee_name else "N/A",
+            "department": department,
             "duration": duration,
             "visit_date": visit_date if visit_date else datetime.now().strftime("%Y-%m-%d"),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2068,16 +2133,16 @@ def returning_visitor():
         visitor_ref.update({"status": initial_status, "last_visit_id": visit_id})
         logger.info(f"New visit added under returning visitor {visitor_id}")
 
-        # ✅ GENERATE QR CODE for returning visitor's new visit
+        # GENERATE QR CODE for returning visitor's new visit
         rv_visit_date = visit_date if visit_date else datetime.now().strftime('%Y-%m-%d')
         try:
             qr_token, qr_payload, qr_img, qr_fb = _create_qr_for_visit(
                 visitor_id, visit_id, rv_visit_date
             )
             visitor_ref.child(f"visits/{visit_id}").update(qr_fb)
-            logger.info(f"✅ QR code generated for returning visitor visit {visit_id}")
+            logger.info(f"QR code generated for returning visitor visit {visit_id}")
         except Exception as qr_exc:
-            logger.error(f"⚠️ QR generation failed for returning visitor (non-fatal): {qr_exc}")
+            logger.error(f"QR generation failed for returning visitor (non-fatal): {qr_exc}")
 
         session["current_visit_id"] = visit_id
 
@@ -2101,9 +2166,9 @@ def returning_visitor():
             session["email_message"] = email_message
         logger.info(f"Returning visitor email: {'Success' if email_success else 'Failed'}")
 
-        # --- Notify employee for approval/rejection ---
+        # --- Notify specific host (only when a named employee flow is used) ---
         employee_notification_sent = False
-        if employee_email and employee_name:
+        if requires_employee_approval and employee_email and employee_name:
             profile_url = request.url_root.rstrip("/") + url_for("employee_action", visitor_id=visitor_id)
             
             # Prepare visitor data for employee notification email
@@ -2130,12 +2195,15 @@ def returning_visitor():
                 })
             logger.info(f"Employee notification: {'Success' if emp_success else 'Failed'} - {emp_message}")
 
-        logger.info(f"Returning visitor registration completed for {visitor_name}")
+        logger.info(
+            "Returning visitor registration completed for %s",
+            visitor_data.get("basic_info", {}).get("name"),
+        )
         return redirect("/check_in")  # Redirect to check-in page
 
     # --- Render form page for returning visitor ---
     logger.info(f"Returning visitor page rendered for: {visitor_data.get('basic_info', {}).get('name')}")
-    return render_template("returning_visitor.html", visitor=visitor_data, employees=employees)
+    return render_template("returning_visitor.html", visitor=visitor_data, departments=departments)
 
 
 

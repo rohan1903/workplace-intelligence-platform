@@ -62,20 +62,25 @@
         </div>
 
         <form id="oldForm" class="checkin-form" method="POST">
+            {% if error %}
+            <div class="form-group" style="padding: 12px; background: rgba(239,35,60,0.1); border: 1px solid var(--error); border-radius: var(--border-radius-sm); color: var(--error); font-weight: 500;">
+                {{ error }}
+            </div>
+            {% endif %}
             <div class="form-group">
                 <label>Purpose of Visit</label>
                 <div class="input-wrapper">
-                    <label><input type="radio" name="purpose_type" value="employee" required> To meet an employee</label>
+                    <label><input type="radio" name="purpose_type" value="department" required> Visiting a department</label>
                     <label><input type="radio" name="purpose_type" value="other" required checked> Other</label>
                 </div>
             </div>
 
-            <div class="form-group" id="employeeSelectGroup" style="display: none;">
-                <label for="employee_name">Select Employee <span class="text-red-500">*</span></label>
-                <select id="employee_name" name="employee_name" class="form-control">
-                    <option value="" disabled selected>Select an employee</option>
-                    {% for emp_id, emp in employees.items() %}
-                        <option value="{{ emp.name }}">{{ emp.name }} ({{ emp.department }})</option>
+            <div class="form-group" id="departmentSelectGroup" style="display: none;">
+                <label for="department">Department <span class="text-red-500">*</span></label>
+                <select id="department" name="department" class="form-control">
+                    <option value="" disabled selected>Select department</option>
+                    {% for d in departments %}
+                        <option value="{{ d }}">{{ d }}</option>
                     {% endfor %}
                 </select>
             </div>
@@ -95,6 +100,7 @@
                 <select id="duration" name="duration" class="form-control" required>
                     <option value="" disabled selected>Select duration</option>
                     <option value="1hr">1 hour</option>
+                    <option value="0.5hr">30 minutes (delivery or quick visit)</option>
                     <option value="2hr">2 hours</option>
                     <option value="3hr">3 hours</option>
                     <option value="Not sure">Not sure</option>
@@ -119,22 +125,22 @@
         dateInput.min = today;
 
         const purposeRadios = document.getElementsByName('purpose_type');
-        const empGroup = document.getElementById('employeeSelectGroup');
+        const deptGroup = document.getElementById('departmentSelectGroup');
         const otherGroup = document.getElementById('otherPurposeGroup');
-        const empSelect = document.getElementById('employee_name');
+        const deptSelect = document.getElementById('department');
         const otherInput = document.getElementById('other_purpose');
 
         function togglePurposeFields() {
-            const isEmployee = document.querySelector('input[name="purpose_type"]:checked')?.value === 'employee';
-            if (isEmployee) {
-                empGroup.style.display = 'block';
+            const isDept = document.querySelector('input[name="purpose_type"]:checked')?.value === 'department';
+            if (isDept) {
+                deptGroup.style.display = 'block';
                 otherGroup.style.display = 'none';
                 otherInput.removeAttribute('required');
-                empSelect.setAttribute('required', 'required');
+                deptSelect.setAttribute('required', 'required');
             } else {
-                empGroup.style.display = 'none';
+                deptGroup.style.display = 'none';
                 otherGroup.style.display = 'block';
-                empSelect.removeAttribute('required');
+                deptSelect.removeAttribute('required');
                 otherInput.setAttribute('required', 'required');
             }
         }
@@ -152,11 +158,11 @@
             const statusMessage = document.getElementById("status-message");
             const messageText = document.getElementById("message-text");
             const purposeType = document.querySelector('input[name="purpose_type"]:checked')?.value;
-            const empSelect = document.getElementById('employee_name');
+            const deptSelectEl = document.getElementById('department');
             const otherInput = document.getElementById('other_purpose');
 
-            if (purposeType === 'employee' && (!empSelect.value || empSelect.value === '')) {
-                messageText.textContent = 'Please select an employee to meet.';
+            if (purposeType === 'department' && (!deptSelectEl.value || deptSelectEl.value === '')) {
+                messageText.textContent = 'Please select a department.';
                 statusMessage.className = 'status-message status-error';
                 statusMessage.style.display = 'flex';
                 return;

@@ -26,6 +26,18 @@
             --transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
         }
 
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
         * {
             margin: 0;
             padding: 0;
@@ -184,7 +196,7 @@
             pointer-events: none;
         }
 
-        #employee-selection-wrapper .input-icon {
+        #department-selection-wrapper .input-icon {
             color: #2563eb;
         }
         
@@ -533,8 +545,7 @@
                     <div class="form-group">
                         <label for="visit_date">Date of Visit</label>
                         <div class="input-wrapper">
-                            <input type="date" id="visit_date" name="visit_date" required>
-                            <i class="fas fa-calendar-alt input-icon"></i>
+                            <input type="date" id="visit_date" name="visit_date" required aria-label="Date of visit">
                         </div>
                         <div class="error-message" id="date-error">Please select a valid visit date.</div>
                     </div>
@@ -543,8 +554,8 @@
                         <label>Purpose of Visit</label>
                         <div class="radio-group">
                             <label>
-                                <input type="radio" name="purpose_type" value="meetEmployee" id="radio-employee" checked>
-                                To meet an employee
+                                <input type="radio" name="purpose_type" value="meetDepartment" id="radio-department" checked>
+                                Visiting a department
                             </label>
                             <label>
                                 <input type="radio" name="purpose_type" value="other" id="radio-other">
@@ -553,12 +564,12 @@
                         </div>
 
                         <div id="purpose-dynamic-input" class="purpose-wrapper">
-                            <div class="input-wrapper" id="employee-selection-wrapper">
-                                <select id="employee-dropdown" name="employeeSelect">
-                                    <option value="" disabled selected>Loading Employees...</option>
-                                    <!-- Employees will be populated dynamically -->
+                            <div class="input-wrapper" id="department-selection-wrapper">
+                                <label for="department-dropdown" class="sr-only">Department</label>
+                                <select id="department-dropdown" name="departmentSelect" aria-label="Department to visit">
+                                    <option value="" disabled selected>Loading departments...</option>
                                 </select>
-                                <i class="fas fa-user-tie input-icon"></i>
+                                <i class="fas fa-building input-icon"></i>
                             </div>
 
                             <div class="input-wrapper" id="other-purpose-wrapper" style="display: none;">
@@ -568,13 +579,14 @@
                             </div>
                         </div>
                         
-                        <div class="error-message" id="purpose-error">Please select an employee or specify the purpose of your visit (min 4 chars).</div>
+                        <div class="error-message" id="purpose-error">Please select a department or specify the purpose of your visit (min 4 chars).</div>
                     </div>
 
                     <div class="form-group">
                         <label for="duration">Duration</label>
                         <select id="duration" name="duration">
                             <option value="1hr">1 hour</option>
+                            <option value="0.5hr">30 minutes (delivery or quick visit)</option>
                             <option value="2hr">2 hours</option>
                             <option value="3hr">3 hours</option>
                             <option value="Not sure">Not sure</option>
@@ -629,11 +641,11 @@
         const registerBtn = document.getElementById("registerBtn");
         const cameraStatus = document.getElementById("camera-status");
         const regForm = document.getElementById("regForm");
-        const radioEmployee = document.getElementById('radio-employee');
+        const radioDepartment = document.getElementById('radio-department');
         const radioOther = document.getElementById('radio-other');
-        const employeeDropdown = document.getElementById('employee-dropdown');
+        const departmentDropdown = document.getElementById('department-dropdown');
         const otherPurposeInput = document.getElementById('other-purpose-input');
-        const employeeWrapper = document.getElementById('employee-selection-wrapper');
+        const departmentWrapper = document.getElementById('department-selection-wrapper');
         const otherWrapper = document.getElementById('other-purpose-wrapper');
 
         // Store captured photo data
@@ -641,18 +653,14 @@
         let faceDetected = false;
         let faceCheckInterval = null;
         let faceRequired = true;  // Will be updated from server
+        /** Bumps on each check; stale async responses must not overwrite UI (caused false "Face detected"). */
+        let faceCheckSeq = 0;
 
         async function loadFaceRequired() {
             try {
                 const r = await fetch("/api/face_required");
                 const d = await r.json();
                 faceRequired = d.face_required !== false;
-                if (!faceRequired) {
-                    document.getElementById("face-status").className = "face-status detected";
-                    document.getElementById("face-status").querySelector(".icon").className = "fas fa-info-circle icon";
-                    document.getElementById("face-status-text").textContent = "Face optional (QR mode). You can register now.";
-                    faceDetected = true;
-                }
             } catch (_) {}
         }
 
@@ -660,8 +668,9 @@
          * Capture current video frame and send to server for face detection check.
          */
         async function checkFace() {
-            if (!faceRequired) return;  // Skip when override is on
+            if (!faceRequired) return;
             if (!video.srcObject || video.videoWidth === 0) return;
+            const seq = ++faceCheckSeq;
             const canvas = document.getElementById("faceCheckCanvas");
             const ctx = canvas.getContext("2d");
             canvas.width = video.videoWidth;
@@ -672,9 +681,16 @@
             const statusEl = document.getElementById("face-status");
             const textEl = document.getElementById("face-status-text");
             const container = document.getElementById("video-container");
-            statusEl.className = "face-status checking";
-            textEl.textContent = "Checking...";
-            statusEl.querySelector(".icon").className = "fas fa-spinner fa-spin icon";
+            const iconEl = statusEl.querySelector(".icon");
+            const wasDetected = faceDetected;
+
+            // Only show "checking" when we are not already in a good state — avoids flashing
+            // the spinner every few seconds while the interval re-validates in the background.
+            if (!wasDetected) {
+                statusEl.className = "face-status checking";
+                textEl.textContent = "Checking...";
+                iconEl.className = "fas fa-spinner fa-spin icon";
+            }
 
             try {
                 const res = await fetch("/api/check_face", {
@@ -683,35 +699,58 @@
                     body: JSON.stringify({ image: dataUrl })
                 });
                 const data = await res.json();
+                if (seq !== faceCheckSeq) return;
                 faceDetected = data.face_detected === true;
                 if (faceDetected) {
                     statusEl.className = "face-status detected";
-                    statusEl.querySelector(".icon").className = "fas fa-check-circle icon";
-                    textEl.textContent = "Face detected ✓ Ready to register";
+                    iconEl.className = "fas fa-check-circle icon";
+                    textEl.textContent = "Face detected";
                     container.classList.remove("face-fail");
                     container.classList.add("face-ok");
                 } else {
                     statusEl.className = "face-status not-detected";
-                    statusEl.querySelector(".icon").className = "fas fa-times-circle icon";
+                    iconEl.className = "fas fa-times-circle icon";
                     const msg = data.error || data.hint || "No face detected. Position your face inside the oval, ensure good lighting.";
                     textEl.innerHTML = msg + ' <a href="/debug_detect" target="_blank" style="color:inherit;text-decoration:underline">Diagnose</a>';
                     container.classList.remove("face-ok");
                     container.classList.add("face-fail");
                 }
             } catch (err) {
+                if (seq !== faceCheckSeq) return;
                 statusEl.className = "face-status not-detected";
-                statusEl.querySelector(".icon").className = "fas fa-exclamation-triangle icon";
+                iconEl.className = "fas fa-exclamation-triangle icon";
                 textEl.textContent = "Check failed. Ensure server is running.";
                 container.classList.remove("face-ok");
                 container.classList.add("face-fail");
                 faceDetected = false;
             }
-            updateRegisterButton();
+            if (seq === faceCheckSeq) {
+                updateRegisterButton();
+            }
         }
 
+        /** True if all required fields pass rules; does not show error UI (used on load / while typing). */
+        function isFormValid() {
+            const name = document.getElementById("name").value.trim();
+            const email = document.getElementById("email").value.trim();
+            if (!validateName(name)) return false;
+            if (!validateEmail(email)) return false;
+            if (radioDepartment.checked) {
+                if (departmentDropdown.value === "") return false;
+            } else if (radioOther.checked) {
+                if (!validateCustomPurpose(otherPurposeInput.value)) return false;
+            } else {
+                return false;
+            }
+            if (!video.srcObject) return false;
+            return true;
+        }
+
+        let submitAttempted = false;
+
         function updateRegisterButton() {
-            const formValid = validateForm();
-            registerBtn.disabled = !(formValid && (faceDetected || !faceRequired));
+            const formValid = isFormValid();
+            registerBtn.disabled = !(formValid && faceDetected);
         }
 
         /**
@@ -757,81 +796,58 @@
                 registerBtn.innerHTML = '<i class="fas fa-camera-slash"></i> Camera Required';
             });
 
-        // --- Employee Fetching Logic ---
-        async function fetchEmployees() {
+        async function fetchDepartments() {
             try {
-                const response = await fetch('/employees');
-                if (!response.ok) {
-                    throw new Error('Failed to fetch employees');
-                }
-
-                const employees = await response.json();
-                populateEmployeeDropdown(employees);
-
-                if (video.srcObject) {
-                    updateRegisterButton();
-                }
+                const response = await fetch('/departments');
+                if (!response.ok) throw new Error('Failed to fetch departments');
+                const departments = await response.json();
+                populateDepartmentDropdown(Array.isArray(departments) ? departments : []);
+                if (video.srcObject) updateRegisterButton();
             } catch (error) {
-                console.error("Error fetching employees:", error);
-                employeeDropdown.innerHTML = '<option value="" disabled selected>Could not load employees</option>';
-                employeeDropdown.disabled = true;
-                showMessage("⚠️ Failed to load employee list. You can still register with 'Other' purpose.");
+                console.error("Error fetching departments:", error);
+                departmentDropdown.innerHTML = '<option value="" disabled selected>Could not load departments</option>';
+                departmentDropdown.disabled = true;
+                showMessage("Failed to load department list. You can still register with 'Other' purpose.");
                 if (video.srcObject) updateRegisterButton();
             }
         }
 
-        /**
-         * Populates the employee dropdown with data.
-         * @param {Array<Object>} employees - List of employee objects.
-         */
-        function populateEmployeeDropdown(employees) {
-            employeeDropdown.innerHTML = '<option value="" disabled selected>Select Employee</option>';
-
-            // Sort employees alphabetically
-            employees.sort((a, b) => a.name.localeCompare(b.name));
-
-            employees.forEach(employee => {
-                const option = document.createElement('option');
-                option.value = employee.id;
-                option.textContent = `${employee.name} (${employee.department || 'N/A'})`;
-                employeeDropdown.appendChild(option);
-            });
-
-            employeeDropdown.disabled = false;
+        function populateDepartmentDropdown(departments) {
+            departmentDropdown.innerHTML = '<option value="" disabled selected>Select department</option>';
+            departments.slice().sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }))
+                .forEach(name => {
+                    const option = document.createElement('option');
+                    option.value = name;
+                    option.textContent = name;
+                    departmentDropdown.appendChild(option);
+                });
+            departmentDropdown.disabled = false;
         }
 
-        // --- Purpose Logic ---
         function togglePurposeInput() {
-            const isEmployee = radioEmployee.checked;
-            
-            if (isEmployee) {
-                employeeWrapper.style.display = 'block';
-                employeeDropdown.disabled = false;
-                
+            const isDept = radioDepartment.checked;
+            if (isDept) {
+                departmentWrapper.style.display = 'block';
+                departmentDropdown.disabled = false;
                 otherWrapper.style.display = 'none';
                 otherPurposeInput.disabled = true;
                 otherPurposeInput.value = '';
-                
                 showValidationStatus('other-purpose-input', true);
             } else {
-                employeeWrapper.style.display = 'none';
-                employeeDropdown.disabled = true;
-                employeeDropdown.value = '';
-                
+                departmentWrapper.style.display = 'none';
+                departmentDropdown.disabled = true;
+                departmentDropdown.value = '';
                 otherWrapper.style.display = 'block';
                 otherPurposeInput.disabled = false;
-
-                showValidationStatus('employee-dropdown', true);
+                showValidationStatus('department-dropdown', true);
             }
-            validateForm();
+            updateRegisterButton();
         }
 
-        // Add listeners for radio buttons
-        radioEmployee.addEventListener('change', togglePurposeInput);
+        radioDepartment.addEventListener('change', togglePurposeInput);
         radioOther.addEventListener('change', togglePurposeInput);
-        
-        // Initial setup for fetching employees and rooms
-        fetchEmployees();
+
+        fetchDepartments();
         fetchRooms();
 
         /**
@@ -877,9 +893,9 @@
         }
         
         function validatePurposeGroup() {
-            if (radioEmployee.checked) {
-                const isSelected = employeeDropdown.value !== "";
-                showValidationStatus('employee-dropdown', isSelected);
+            if (radioDepartment.checked) {
+                const isSelected = departmentDropdown.value !== "";
+                showValidationStatus('department-dropdown', isSelected);
                 return isSelected;
             } else if (radioOther.checked) {
                 const isValid = validateCustomPurpose(otherPurposeInput.value);
@@ -899,7 +915,7 @@
             if (field.tagName === 'SELECT') {
                 field.classList.remove('success', 'error');
                 if (field.value === "" && !isValid) {
-                    field.classList.add('error');
+                    if (submitAttempted) field.classList.add('error');
                 } else if (isValid) {
                     field.classList.add('success');
                 }
@@ -913,7 +929,7 @@
             if (fieldId === 'email') originalIconClass = 'fa-envelope';
             
             field.classList.remove('success', 'error');
-            if (icon && fieldId !== 'employee-dropdown' && fieldId !== 'other-purpose-input') {
+            if (icon && fieldId !== 'department-dropdown' && fieldId !== 'other-purpose-input') {
                 icon.classList.remove('fa-user', 'fa-envelope', 'fa-check-circle', 'fa-times-circle');
                 icon.style.color = 'var(--gray)';
             }
@@ -946,24 +962,30 @@
             // 1. Validate name
             const isNameValid = validateName(name);
             if (!isNameValid) {
-                document.getElementById("name-error").style.display = 'block';
                 isValid = false;
+                if (submitAttempted) {
+                    document.getElementById("name-error").style.display = 'block';
+                }
             }
             showValidationStatus('name', isNameValid);
 
             // 2. Validate email
             const isEmailValid = validateEmail(email);
             if (!isEmailValid) {
-                document.getElementById("email-error").style.display = 'block';
                 isValid = false;
+                if (submitAttempted) {
+                    document.getElementById("email-error").style.display = 'block';
+                }
             }
             showValidationStatus('email', isEmailValid);
 
             // 3. Validate purpose group
             const isPurposeValid = validatePurposeGroup();
             if (!isPurposeValid) {
-                document.getElementById("purpose-error").style.display = 'block';
                 isValid = false;
+                if (submitAttempted) {
+                    document.getElementById("purpose-error").style.display = 'block';
+                }
             }
 
             // 4. Camera required for face capture
@@ -976,31 +998,37 @@
 
         // Add event listeners for dynamic validation
         document.getElementById("name").addEventListener('input', () => {
-             showValidationStatus('name', validateName(document.getElementById("name").value));
+            showValidationStatus('name', validateName(document.getElementById("name").value));
+            updateRegisterButton();
         });
         document.getElementById("email").addEventListener('input', () => {
             showValidationStatus('email', validateEmail(document.getElementById("email").value));
-        });
-        employeeDropdown.addEventListener('change', () => {
-             validatePurposeGroup();
-        });
-        otherPurposeInput.addEventListener('input', () => {
-             validatePurposeGroup();
-        });
-        
-        // This is the function that controls the button's overall state
-        regForm.addEventListener('input', () => {
-            validateForm();
             updateRegisterButton();
         });
+        departmentDropdown.addEventListener('change', () => {
+            validatePurposeGroup();
+            updateRegisterButton();
+        });
+        otherPurposeInput.addEventListener('input', () => {
+            validatePurposeGroup();
+            updateRegisterButton();
+        });
+
+        regForm.addEventListener('input', (e) => {
+            if (e.target && e.target.id !== 'name' && e.target.id !== 'email' && e.target.id !== 'other-purpose-input') {
+                updateRegisterButton();
+            }
+        });
+        regForm.addEventListener('change', () => updateRegisterButton());
 
         // Form submission handler
         regForm.addEventListener('submit', async function(e) {
             e.preventDefault();
-            
-            // First, validate the form
+
+            submitAttempted = true;
             if (!validateForm()) {
                 showMessage("Please fix the errors in the form before submitting.");
+                updateRegisterButton();
                 return;
             }
 
@@ -1037,24 +1065,23 @@
 
                 // Determine purpose type and values
                 let purposeType = "other";
-                let employeeSelect = "";
+                let departmentSelect = "";
                 let purpose = "";
 
-                if (radioEmployee.checked) {
-                    purposeType = "meetEmployee";
-                    employeeSelect = employeeDropdown.value;
-                    purpose = `Meeting with ${employeeDropdown.options[employeeDropdown.selectedIndex].text.split(' - ')[0]}`;
+                if (radioDepartment.checked) {
+                    purposeType = "meetDepartment";
+                    departmentSelect = departmentDropdown.value;
+                    purpose = "Department visit";
                 } else if (radioOther.checked) {
                     purposeType = "other";
                     purpose = otherPurposeInput.value.trim();
                 }
 
-                // Prepare form data for submission
                 const formData = {
                     name: document.getElementById("name").value.trim(),
                     email: document.getElementById("email").value.trim(),
                     purposeType: purposeType,
-                    employeeSelect: employeeSelect,
+                    departmentSelect: departmentSelect,
                     purpose: purpose,
                     duration: document.getElementById("duration").value,
                     visit_date: visitDateValue, // include date in submission

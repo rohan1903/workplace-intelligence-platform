@@ -1,5 +1,17 @@
 import os
+import sys
 import uuid
+from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+try:
+    from presentation_demo import PRESENTATION_ROOM_IDS, PRESENTATION_ROOM_OPTIONS
+except ImportError:
+    PRESENTATION_ROOM_OPTIONS = {}
+    PRESENTATION_ROOM_IDS = frozenset()
+
 import smtplib
 import random
 import copy
@@ -655,18 +667,28 @@ def get_mock_rooms():
 _mock_rooms_cache = None
 
 def get_meeting_rooms():
-    """Return all meeting rooms (mock or Firebase)."""
+    """Return all meeting rooms (mock or Firebase), merged with shared presentation demo rooms."""
     global _mock_rooms_cache
     if USE_MOCK_DATA:
         if _mock_rooms_cache is None:
             _mock_rooms_cache = dict(get_mock_rooms())
-        return _mock_rooms_cache
-    ref = db.reference('meeting_rooms')
-    return ref.get() or {}
+        base = dict(_mock_rooms_cache)
+    else:
+        ref = db.reference('meeting_rooms')
+        raw = ref.get() or {}
+        base = dict(raw) if isinstance(raw, dict) else {}
+    for rid, meta in PRESENTATION_ROOM_OPTIONS.items():
+        if rid not in base:
+            entry = dict(meta)
+            entry["presentation_demo"] = True
+            base[rid] = entry
+    return base
 
 def save_meeting_room(room_id, data):
     """Create or update a meeting room. data: name, capacity, floor, amenities."""
     global _mock_rooms_cache
+    if room_id in PRESENTATION_ROOM_IDS:
+        raise ValueError("Presentation demo rooms cannot be edited")
     payload = {
         'name': str(data.get('name', '')).strip() or 'Unnamed',
         'capacity': int(data.get('capacity', 0)) if data.get('capacity') not in (None, '') else 0,
@@ -683,6 +705,8 @@ def save_meeting_room(room_id, data):
 def delete_meeting_room(room_id):
     """Remove a meeting room."""
     global _mock_rooms_cache
+    if room_id in PRESENTATION_ROOM_IDS:
+        return
     if USE_MOCK_DATA:
         if _mock_rooms_cache is None:
             _mock_rooms_cache = dict(get_mock_rooms())
@@ -1172,7 +1196,7 @@ def upload_invitations_page():
                 
                 // Simulate processing (in real app, this would be handled by the backend)
                 setTimeout(() => {
-                    alert('✅ Invitations sent successfully!');
+                    alert('Invitations sent successfully!');
                 }, 2000);
             });
 
@@ -5427,9 +5451,13 @@ def rooms_list():
                             <div><span class="text-gray-500">Amenities</span> {{ (r.amenities or '-')[:50] }}{% if (r.amenities or '')|length > 50 %}...{% endif %}</div>
                         </dl>
                     </div>
-                    <div class="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-wrap gap-2">
+                    <div class="px-4 py-3 bg-gray-50 border-t border-gray-100 flex flex-wrap gap-2 items-center">
+                        {% if r.get('presentation_demo') %}
+                        <span class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 font-medium">Demo room (read-only)</span>
+                        {% else %}
                         <button type="button" class="text-blue-600 hover:underline text-sm" data-action="edit" data-id="{{ r.id }}" data-name="{{ r.name|e }}" data-capacity="{{ r.capacity }}" data-floor="{{ (r.floor or '')|e }}" data-amenities="{{ (r.amenities or '')|e }}">Edit</button>
                         <button type="button" class="text-red-600 hover:underline text-sm" data-action="delete" data-id="{{ r.id }}" data-name="{{ r.name|e }}">Delete</button>
+                        {% endif %}
                     </div>
                 </div>
                 {% endfor %}
@@ -5550,6 +5578,8 @@ def api_rooms_create():
 def api_rooms_update(room_id):
     """Update a meeting room. JSON: name, capacity, floor, amenities."""
     try:
+        if room_id in PRESENTATION_ROOM_IDS:
+            return jsonify({'success': False, 'message': 'Demo rooms cannot be edited'}), 403
         data = request.get_json() or {}
         save_meeting_room(room_id, data)
         return jsonify({'success': True})
@@ -5560,6 +5590,8 @@ def api_rooms_update(room_id):
 def api_rooms_delete(room_id):
     """Delete a meeting room."""
     try:
+        if room_id in PRESENTATION_ROOM_IDS:
+            return jsonify({'success': False, 'message': 'Demo rooms cannot be deleted'}), 403
         delete_meeting_room(room_id)
         return jsonify({'success': True})
     except Exception as e:
