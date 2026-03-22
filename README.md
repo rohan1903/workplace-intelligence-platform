@@ -246,6 +246,8 @@ When demoing the system (e.g. Register + Gate in real time with fresh visitors):
 
 - **Register & Gate:** Use real Firebase (no mock). Register a new visitor with face scan, get approved, then check in/out at the gate so the flow is live.
 - **Admin dashboard:** Run Admin with **`USE_MOCK_DATA=True`** (default). The dashboard then shows rich, stable mock data (visitors, analytics, blacklist, occupancy) so you can showcase all features (filters, search, blacklist, analytics, room management) without pre-populating real data. Mock data is fixed per server run so it does not change on every refresh.
+- **Admin automated tests (mock):** From `admin/`, run `python -m unittest tests.test_admin_dashboard_mock -v`. This forces mock mode for the test process; keep `USE_MOCK_DATA=True` in `admin/.env` (or unset) when running the server the same way.
+- **Admin manual QA:** Use [docs/TEST_PLAN.md](docs/TEST_PLAN.md) Phase 9 in the browser. With mock data, listed visitors are generated (not live Firebase registrations); blacklist notification email only sends if SMTP is configured in `admin/.env`.
 - **Optional:** To show the same visitors you just registered in the dashboard, run Admin with **`USE_MOCK_DATA=False`** and use the same Firebase project; the dashboard will read live data from Firebase.
 
 ## Key Features

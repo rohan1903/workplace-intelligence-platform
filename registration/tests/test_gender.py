@@ -14,7 +14,7 @@ import onnxruntime
 # Load ONNX gender model (from registration directory)
 model_path = _register_app_dir / "genderage.onnx"
 if not model_path.exists():
-    print(f"❌ Model not found: {model_path}")
+    print(f"[FAIL] Model not found: {model_path}")
     sys.exit(1)
 session = onnxruntime.InferenceSession(str(model_path))
 
@@ -40,7 +40,7 @@ def detect_gender(img_cv2):
             gender_output = outputs[1]  # Use second output if present
             gender_index = np.argmax(gender_output[0])
         else:
-            print("❌ No outputs returned from model.")
+            print("[FAIL] No outputs returned from model.")
             return "Unknown"
 
         return "Male" if gender_index == 1 else "Female"
@@ -55,7 +55,7 @@ cap = cv2.VideoCapture(0)
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("❌ Failed to grab frame")
+        print("[FAIL] Failed to grab frame")
         break
 
     # Basic center crop for approximation

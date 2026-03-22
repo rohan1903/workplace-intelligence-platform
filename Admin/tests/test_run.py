@@ -11,33 +11,33 @@ sys.path.insert(0, str(_admin_dir))
 print("Testing imports...")
 try:
     from flask import Flask
-    print("✅ Flask imported successfully")
+    print("[OK] Flask imported successfully")
 except ImportError as e:
-    print(f"❌ Flask import failed: {e}")
+    print(f"[FAIL] Flask import failed: {e}")
     print("   Install with: pip3 install Flask")
     sys.exit(1)
 
 try:
     import pandas
-    print("✅ pandas imported successfully")
+    print("[OK] pandas imported successfully")
 except ImportError as e:
-    print(f"⚠️  pandas import failed: {e}")
+    print(f"[WARN] pandas import failed: {e}")
     print("   Install with: pip3 install pandas")
 
 try:
     from dotenv import load_dotenv
-    print("✅ python-dotenv imported successfully")
+    print("[OK] python-dotenv imported successfully")
 except ImportError as e:
-    print(f"⚠️  python-dotenv import failed: {e}")
+    print(f"[WARN] python-dotenv import failed: {e}")
     print("   Install with: pip3 install python-dotenv")
 
 print("\nTesting app.py import...")
 try:
     import app
-    print("✅ app.py imported successfully")
-    print("\n✅ All checks passed! You can run: python app.py")
+    print("[OK] app.py imported successfully")
+    print("\n[OK] All checks passed! You can run: python app.py")
 except Exception as e:
-    print(f"❌ Error importing app.py: {e}")
+    print(f"[FAIL] Error importing app.py: {e}")
     import traceback
     traceback.print_exc()
     sys.exit(1)

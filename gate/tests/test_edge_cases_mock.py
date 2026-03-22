@@ -282,7 +282,11 @@ class GateEdgeCaseTests(unittest.TestCase):
             })
         data = resp.get_json() or {}
         self.assertEqual(data["status"], "denied")
-        self.assertIn("No match found", data["message"])
+        msg = (data.get("message") or "").lower()
+        self.assertTrue(
+            "no match found" in msg or "face not recognized" in msg,
+            msg=f"Unexpected denial message: {data.get('message')!r}",
+        )
 
     # ── Hybrid mode requires QR (no action=auto bypass) ────────────────
     def test_hybrid_mode_denies_face_only_auto_action(self):

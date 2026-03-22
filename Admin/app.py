@@ -363,11 +363,37 @@ _MOCK_BLACKLIST_STATE = {}
 _MOCK_VISITORS_BASE = None
 _MOCK_EMPLOYEES_CACHE = None
 
+_ADMIN_MOCK_SEED = None
+
+
+def _admin_mock_seed():
+    """Deterministic mock dataset: default seed is fixed so data does not change across refreshes or restarts.
+
+    Override with MOCK_DATA_SEED in the environment when you want a different static dataset.
+    """
+    global _ADMIN_MOCK_SEED
+    if _ADMIN_MOCK_SEED is None:
+        raw = os.environ.get("MOCK_DATA_SEED", "").strip()
+        if raw:
+            try:
+                _ADMIN_MOCK_SEED = int(raw)
+            except ValueError:
+                _ADMIN_MOCK_SEED = hash(raw) % (2**31)
+        else:
+            # Same default as historical visitor mock (stable demos; optional override via MOCK_DATA_SEED).
+            _ADMIN_MOCK_SEED = 42
+        print(
+            f"[*] Admin mock data seed={_ADMIN_MOCK_SEED} "
+            "(set MOCK_DATA_SEED to use another fixed dataset)"
+        )
+    return _ADMIN_MOCK_SEED
+
+
 def get_mock_visitors():
     """Generate diverse mock visitor data covering normal and edge cases for analytics and occupancy.
 
-    Uses a fixed random seed and cached base snapshot so the same visitors are shown across
-    page refreshes during a demo, while still allowing blacklist changes to take effect.
+    Uses a fixed RNG seed (``MOCK_DATA_SEED`` or default ``42``) and a cached base snapshot so the
+    same visitors appear across page refreshes and app restarts; blacklist edits still apply.
     """
     global _MOCK_VISITORS_BASE
 
@@ -391,37 +417,62 @@ def get_mock_visitors():
     mock_employees = get_mock_employees()
     employee_names = [e.get("name", "") for e in mock_employees.values() if e.get("name")]
 
-    random.seed(42)  # Deterministic mock data so blacklist overlay and counts are stable across requests
+    rng = random.Random(_admin_mock_seed())
     mock_visitors = {}
     base = datetime.now()
 
     first_names = ['John', 'Jane', 'Bob', 'Alice', 'Charlie', 'Diana', 'Ethan', 'Fiona', 'George', 'Hannah',
                    'Michael', 'Sarah', 'David', 'Emily', 'James', 'Olivia', 'William', 'Sophia', 'Robert', 'Emma',
                    'Richard', 'Isabella', 'Joseph', 'Mia', 'Thomas', 'Charlotte', 'Christopher', 'Amelia', 'Daniel', 'Harper',
-                   'Matthew', 'Evelyn', 'Anthony', 'Abigail', 'Mark', 'Elizabeth', 'Donald', 'Sofia', 'Steven', 'Avery']
+                   'Matthew', 'Evelyn', 'Anthony', 'Abigail', 'Mark', 'Elizabeth', 'Donald', 'Sofia', 'Steven', 'Avery',
+                   'Priya', 'Kenji', 'Ananya', 'Diego', 'Yuki', 'Omar', 'Nina', 'Viktor', 'Zara', 'Luis']
     last_names = ['Doe', 'Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez',
-                  'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin']
-    purposes = ['Business Meeting', 'Job Interview', 'Client Presentation', 'Product Demo', 'Training Session',
-                'Delivery', 'Maintenance Work', 'Security Audit', 'Vendor Meeting', 'Consultation',
-                'Site Visit', 'Equipment Installation', 'Network Setup', 'Software Demo', 'Contract Signing',
-                'Team Collaboration', 'Project Review', 'Budget Discussion', 'Strategic Planning', 'Emergency Response']
+                  'Martinez', 'Hernandez', 'Lopez', 'Wilson', 'Anderson', 'Thomas', 'Taylor', 'Moore', 'Jackson', 'Martin',
+                  'Patel', 'Nguyen', 'Okafor', 'Silva', 'Kowalski', 'Nakamura', 'Haddad', 'Bergstrom', 'Okonkwo', 'Reyes']
+    # Purposes span dashboard purpose buckets (meetings, employee-meeting, interview, delivery, maintenance, other).
+    purposes = [
+        'Business Meeting', 'Client Presentation', 'Product Demo', 'Training Session',
+        'Meeting with employee host', 'Executive meeting with employee',
+        'Job Interview', 'Panel interview for engineering role',
+        'Package Delivery', 'Courier delivery — documents',
+        'Maintenance Work', 'HVAC maintenance visit', 'Security Audit', 'Vendor Meeting', 'Consultation',
+        'Site Visit', 'Equipment Installation', 'Network Setup', 'Software Demo', 'Contract Signing',
+        'Team Collaboration', 'Project Review', 'Budget Discussion', 'Strategic Planning', 'Emergency Response',
+        'Badge re-issue', 'Wellness check-in',
+    ]
     departments = ['IT', 'HR', 'Sales', 'Marketing', 'Finance', 'Operations', 'Engineering', 'Legal', 'Security', 'Facilities']
     employee_first = ['Sarah', 'Mike', 'Emily', 'David', 'Lisa', 'Jennifer', 'Chris', 'Amanda', 'Ryan', 'Jessica']
     employee_last = ['Johnson', 'Chen', 'Rodriguez', 'Kim', 'Anderson', 'Martinez', 'Taylor', 'Lee', 'White', 'Harris']
-    companies = ['TechCorp', 'Global Solutions', 'Innovate Inc', 'Digital Dynamics', 'Cloud Systems', 'Smart Solutions']
+    companies = ['TechCorp', 'Global Solutions', 'Innovate Inc', 'Digital Dynamics', 'Cloud Systems', 'Smart Solutions',
+                 'Northwind Traders', 'Contoso Ltd', 'Fabrikam Industries']
     blacklist_reasons = ['Security violation', 'Unauthorized access attempt', 'Previous misconduct', 'Policy violation', 'No reason provided']
-    positive_feedback = ["Great check-in experience, very smooth and fast.", "Staff were helpful and the process was efficient."]
-    neutral_feedback = ["Process was okay, nothing unusual.", "The visit went as expected."]
-    negative_feedback = ["Long waiting time at reception.", "The process felt confusing at first."]
+    positive_feedback = [
+        "Great check-in experience, very smooth and fast.",
+        "Staff were helpful and the process was efficient.",
+        "Loved the digital flow; badge pickup was quick.",
+        "Reception team was professional and welcoming.",
+    ]
+    neutral_feedback = [
+        "Process was okay, nothing unusual.",
+        "The visit went as expected.",
+        "Average experience; signage could be clearer.",
+    ]
+    negative_feedback = [
+        "Long waiting time at reception.",
+        "The process felt confusing at first.",
+        "Wi‑Fi guest access did not work on first try.",
+        "Parking instructions were unclear.",
+    ]
 
     room_ids = list(get_mock_rooms().keys())
 
     def make_visitor(visitor_id, full_name, status, check_in, check_out_time_str, expected_checkout_str,
-                     purpose, dept, employee_name, expected_duration, is_blacklisted, extra_visits=None, room_id=None):
+                     purpose, dept, employee_name, expected_duration, is_blacklisted, extra_visits=None, room_id=None,
+                     stay_hours=None):
         if room_id is None and room_ids:
-            room_id = random.choice(room_ids)
+            room_id = rng.choice(room_ids)
         first, last = full_name.split(' ', 1) if ' ' in full_name else (full_name, '')
-        email = f"{first.lower()}.{last.lower()}{random.randint(1,99)}@example.com"
+        email = f"{first.lower()}.{last.lower()}{rng.randint(1, 99)}@example.com"
         visit_data = {
             'check_in_time': check_in.strftime('%Y-%m-%d %H:%M:%S') if check_in else 'N/A',
             'check_out_time': check_out_time_str,
@@ -438,18 +489,22 @@ def get_mock_visitors():
         if extra_visits:
             visits.update(extra_visits)
         feedbacks = {}
-        for j in range(random.randint(0, 2)):
-            sentiment = random.choice(["positive", "neutral", "negative"])
-            text = random.choice(positive_feedback if sentiment == "positive" else negative_feedback if sentiment == "negative" else neutral_feedback)
-            feedbacks[f"feedback_{j+1}"] = {"text": text, "timestamp": (base - timedelta(days=random.randint(0, 14))).strftime('%Y-%m-%d %H:%M:%S'), "visitor_id": visitor_id}
+        for j in range(rng.randint(0, 4)):
+            sentiment = rng.choice(["positive", "neutral", "negative"])
+            text = rng.choice(positive_feedback if sentiment == "positive" else negative_feedback if sentiment == "negative" else neutral_feedback)
+            feedbacks[f"feedback_{j+1}"] = {
+                "text": text,
+                "timestamp": (base - timedelta(days=rng.randint(0, 45))).strftime('%Y-%m-%d %H:%M:%S'),
+                "visitor_id": visitor_id,
+            }
         rec = {
             'basic_info': {
                 'name': full_name,
-                'contact': f"+1-555-{random.randint(100,999)}-{random.randint(1000,9999)}",
+                'contact': f"+1-555-{rng.randint(100, 999)}-{rng.randint(1000, 9999)}",
                 'email': email,
                 'blacklisted': is_blacklisted,
-                'blacklist_reason': random.choice(blacklist_reasons) if is_blacklisted else 'No reason provided',
-                'company': random.choice(companies) if random.random() < 0.5 else 'N/A',
+                'blacklist_reason': rng.choice(blacklist_reasons) if is_blacklisted else 'No reason provided',
+                'company': rng.choice(companies) if rng.random() < 0.55 else 'N/A',
             },
             'visits': visits,
             'feedbacks': feedbacks,
@@ -465,21 +520,29 @@ def get_mock_visitors():
         rec['expected_duration'] = expected_duration
         rec['blacklisted'] = is_blacklisted
         rec['room_id'] = room_id or ''
+        dur_h = stay_hours
+        if dur_h is None and status == 'Checked-Out' and check_in and check_out_time_str and check_out_time_str != 'N/A':
+            try:
+                co = datetime.strptime(check_out_time_str, '%Y-%m-%d %H:%M:%S')
+                dur_h = max(1, int((co - check_in).total_seconds() // 3600))
+            except ValueError:
+                dur_h = None
+        rec['duration'] = f"{dur_h} hr" if dur_h else ''
         return rec
 
     idx = 0
     # Use employee names that are guaranteed to exist in `/employees` mock mode.
     if employee_names:
-        emp = lambda: random.choice(employee_names)
+        emp = lambda: rng.choice(employee_names)
     else:
         # Fallback: should be rare, but keeps mock generation robust.
-        emp = lambda: f"{random.choice(employee_first)} {random.choice(employee_last)}"
-    dept = lambda: random.choice(departments)
-    name = lambda: f"{random.choice(first_names)} {random.choice(last_names)}"
-    purpose = lambda: random.choice(purposes)
+        emp = lambda: f"{rng.choice(employee_first)} {rng.choice(employee_last)}"
+    dept = lambda: rng.choice(departments)
+    name = lambda: f"{rng.choice(first_names)} {rng.choice(last_names)}"
+    purpose = lambda: rng.choice(purposes)
 
     # --- Scenario 1: Currently checked in (last 24h) — for occupancy and "Currently Active" ---
-    for hours_ago in [0, 1, 2, 5, 8, 12, 18, 23]:
+    for hours_ago in [0, 1, 2, 3, 5, 6, 8, 10, 12, 14, 18, 21, 23]:
         idx += 1
         check_in = base - timedelta(hours=hours_ago)
         expected_checkout = check_in + timedelta(hours=3)
@@ -488,88 +551,94 @@ def get_mock_visitors():
             purpose(), dept(), emp(), '2 hours', False)
 
     # --- Scenario 2: Time exceeded (checked in, expected checkout in past) ---
-    for _ in range(3):
+    for _ in range(6):
         idx += 1
-        check_in = base - timedelta(hours=4)
-        expected_checkout = base - timedelta(hours=2)
+        check_in = base - timedelta(hours=rng.randint(3, 8))
+        expected_checkout = base - timedelta(hours=rng.randint(1, 3))
         mock_visitors[f"visitor_{idx}"] = make_visitor(
             idx, name(), 'Checked-In', check_in, 'N/A', expected_checkout.strftime('%Y-%m-%d %H:%M:%S'),
             purpose(), dept(), emp(), '1 hour', False)
 
     # --- Scenario 3: Checked out in last 24h (various spans for occupancy-over-time) ---
-    for (start_h, stay_h) in [(23, 1), (20, 2), (18, 3), (12, 4), (10, 2), (6, 3), (4, 2), (2, 1), (1, 0)]:
+    for (start_h, stay_h) in [(23, 1), (22, 2), (20, 2), (18, 3), (15, 2), (12, 4), (10, 2), (8, 1), (6, 3), (4, 2), (2, 1), (1, 0)]:
         idx += 1
         check_in = base - timedelta(hours=start_h)
-        check_out = check_in + timedelta(hours=max(stay_h, 1))
+        stay = max(stay_h, 1)
+        check_out = check_in + timedelta(hours=stay)
         mock_visitors[f"visitor_{idx}"] = make_visitor(
             idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
-            purpose(), dept(), emp(), f"{max(stay_h,1)} hours", False)
+            purpose(), dept(), emp(), f"{stay} hours", False, stay_hours=stay)
 
     # --- Scenario 4: Registered, Approved, Rejected, Rescheduled (no check-in) ---
-    for status in ['Registered', 'Registered', 'Approved', 'Approved', 'Rejected', 'Rescheduled']:
+    for status in ['Registered', 'Registered', 'Approved', 'Approved', 'Rejected', 'Rescheduled', 'Registered', 'Approved']:
         idx += 1
         mock_visitors[f"visitor_{idx}"] = make_visitor(
             idx, name(), status, None, 'N/A', 'N/A', purpose(), dept(), emp(), '1 hour', False)
         mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
 
     # --- Scenario 5: Blacklisted mix ---
-    for _ in range(4):
+    for _ in range(8):
         idx += 1
-        check_in = base - timedelta(hours=random.randint(1, 20)) if random.random() < 0.5 else None
+        check_in = base - timedelta(hours=rng.randint(1, 20)) if rng.random() < 0.5 else None
         if check_in:
-            check_out = check_in + timedelta(hours=random.randint(1, 3))
+            stay = rng.randint(1, 4)
+            check_out = check_in + timedelta(hours=stay)
             mock_visitors[f"visitor_{idx}"] = make_visitor(
                 idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
-                purpose(), dept(), emp(), '2 hours', True)
+                purpose(), dept(), emp(), '2 hours', True, stay_hours=stay)
         else:
             mock_visitors[f"visitor_{idx}"] = make_visitor(
                 idx, name(), 'Registered', None, 'N/A', 'N/A', purpose(), dept(), emp(), '1 hour', True)
             mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
 
     # --- Scenario 6: Multiple visits (recurring visitors) ---
-    for _ in range(5):
+    for _ in range(10):
         idx += 1
-        check_in = base - timedelta(hours=random.randint(2, 22))
-        check_out = check_in + timedelta(hours=random.randint(1, 4))
+        check_in = base - timedelta(hours=rng.randint(2, 22))
+        stay = rng.randint(1, 5)
+        check_out = check_in + timedelta(hours=stay)
         prev_visit = {
             f"visit_{idx}_prev": {
-                'check_in_time': (base - timedelta(days=random.randint(5, 30), hours=random.randint(9, 17))).strftime('%Y-%m-%d %H:%M:%S'),
-                'check_out_time': (base - timedelta(days=random.randint(5, 30), hours=random.randint(6, 14))).strftime('%Y-%m-%d %H:%M:%S'),
+                'check_in_time': (base - timedelta(days=rng.randint(5, 30), hours=rng.randint(9, 17))).strftime('%Y-%m-%d %H:%M:%S'),
+                'check_out_time': (base - timedelta(days=rng.randint(5, 30), hours=rng.randint(6, 14))).strftime('%Y-%m-%d %H:%M:%S'),
                 'status': 'Checked-Out', 'purpose': purpose(), 'employee_name': emp(), 'department': dept(),
                 'expected_duration': '2 hours', 'expected_checkout_time': 'N/A', 'created_at': (base - timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S'),
             }
         }
         mock_visitors[f"visitor_{idx}"] = make_visitor(
             idx, name(), 'Checked-Out', check_in, check_out.strftime('%Y-%m-%d %H:%M:%S'), 'N/A',
-            purpose(), dept(), emp(), '2 hours', False, extra_visits=prev_visit)
+            purpose(), dept(), emp(), '2 hours', False, extra_visits=prev_visit, stay_hours=stay)
 
     # --- Scenario 7: Extra random visitors for volume and variety ---
-    for _ in range(25):
+    for _ in range(55):
         idx += 1
-        days_ago = random.randint(0, 30)
-        hours_ago = random.randint(0, 23)
+        days_ago = rng.randint(0, 30)
+        hours_ago = rng.randint(0, 23)
         check_in = base - timedelta(days=days_ago, hours=hours_ago)
-        status = random.choices(
+        status = rng.choices(
             ['Registered', 'Approved', 'Checked-In', 'Checked-Out', 'Time Exceeded', 'Rescheduled', 'Rejected'],
             weights=[0.12, 0.15, 0.22, 0.28, 0.05, 0.10, 0.08]
         )[0]
         if status in ['Checked-Out', 'Time Exceeded']:
-            duration_h = random.randint(1, 6)
+            duration_h = rng.randint(1, 6)
             check_out = check_in + timedelta(hours=duration_h)
             check_out_str = check_out.strftime('%Y-%m-%d %H:%M:%S')
             expected_checkout_str = 'N/A'
         elif status == 'Checked-In':
             check_out_str = 'N/A'
-            expected_checkout_str = (check_in + timedelta(hours=random.randint(1, 4))).strftime('%Y-%m-%d %H:%M:%S')
+            expected_checkout_str = (check_in + timedelta(hours=rng.randint(1, 4))).strftime('%Y-%m-%d %H:%M:%S')
+            duration_h = None
         else:
             check_in = None
             check_out_str = 'N/A'
             expected_checkout_str = 'N/A'
+            duration_h = None
         mock_visitors[f"visitor_{idx}"] = make_visitor(
             idx, name(), status,
             check_in, check_out_str, expected_checkout_str,
-            purpose(), dept(), emp(), f"{random.randint(1,4)} hours",
-            random.random() < 0.1)
+            purpose(), dept(), emp(), f"{rng.randint(1, 4)} hours",
+            rng.random() < 0.12,
+            stay_hours=duration_h if status in ('Checked-Out', 'Time Exceeded') else None)
         if check_in is None:
             mock_visitors[f"visitor_{idx}"]['check_in_time'] = 'N/A'
 
@@ -590,25 +659,30 @@ def get_mock_visitors():
 def get_mock_employees():
     """Generate diverse mock employee data.
 
-    Uses a fixed random seed and cache so the same employees are shown across page refreshes.
+    Uses an RNG derived from the same admin mock seed as visitors; results are cached (static across refreshes).
     """
     global _MOCK_EMPLOYEES_CACHE
 
     if _MOCK_EMPLOYEES_CACHE is not None:
         return _MOCK_EMPLOYEES_CACHE
 
-    random.seed(123)
-    departments = ['IT', 'HR', 'Sales', 'Marketing', 'Finance', 'Operations', 'Engineering', 'Legal', 'Security', 'Facilities']
-    
+    rng = random.Random(_admin_mock_seed() + 17_389_711)
+    departments = [
+        'IT', 'HR', 'Sales', 'Marketing', 'Finance', 'Operations', 'Engineering', 'Legal', 'Security', 'Facilities',
+        'R&D', 'Executive', 'Admin',
+    ]
+
     first_names = ['Sarah', 'Mike', 'Emily', 'David', 'Lisa', 'Jennifer', 'Chris', 'Amanda', 'Ryan', 'Jessica',
                    'Kevin', 'Nicole', 'Brian', 'Michelle', 'Jason', 'Ashley', 'Justin', 'Stephanie', 'Brandon', 'Melissa',
-                   'Robert', 'Nicole', 'Daniel', 'Lauren', 'Matthew', 'Rachel', 'Andrew', 'Samantha', 'Joshua', 'Megan']
-    
+                   'Robert', 'Daniel', 'Lauren', 'Matthew', 'Rachel', 'Andrew', 'Samantha', 'Joshua', 'Megan',
+                   'Priya', 'Kenji', 'Ananya', 'Diego', 'Yuki', 'Omar', 'Nina', 'Viktor', 'Zara', 'Luis']
+
     last_names = ['Johnson', 'Chen', 'Rodriguez', 'Kim', 'Anderson', 'Martinez', 'Taylor', 'Lee', 'White', 'Harris',
-                  'Wilson', 'Moore', 'Jackson', 'Thompson', 'Garcia', 'Martinez', 'Robinson', 'Clark', 'Rodriguez', 'Lewis']
-    
+                  'Wilson', 'Moore', 'Jackson', 'Thompson', 'Garcia', 'Robinson', 'Clark', 'Lewis',
+                  'Patel', 'Nguyen', 'Okafor', 'Silva', 'Kowalski', 'Nakamura', 'Haddad', 'Bergstrom']
+
     positions_by_dept = {
-        'IT': ['Senior Developer', 'Software Engineer', 'DevOps Engineer', 'System Administrator', 'IT Manager', 'Network Engineer'],
+        'IT': ['Senior Developer', 'Software Engineer', 'DevOps Engineer', 'System Administrator', 'IT Manager', 'Network Engineer', 'SRE', 'Data Engineer'],
         'HR': ['HR Manager', 'Recruiter', 'HR Specialist', 'Talent Acquisition', 'Benefits Coordinator', 'HR Director'],
         'Sales': ['Sales Manager', 'Account Executive', 'Sales Representative', 'Business Development', 'Sales Director', 'Account Manager'],
         'Marketing': ['Marketing Manager', 'Content Creator', 'Digital Marketing Specialist', 'Brand Manager', 'Marketing Director', 'SEO Specialist'],
@@ -617,40 +691,43 @@ def get_mock_employees():
         'Engineering': ['Senior Engineer', 'Project Engineer', 'Engineering Manager', 'Lead Engineer', 'Principal Engineer'],
         'Legal': ['Legal Counsel', 'Compliance Officer', 'Legal Assistant', 'General Counsel', 'Paralegal'],
         'Security': ['Security Manager', 'Security Analyst', 'Security Officer', 'Chief Security Officer', 'Security Specialist'],
-        'Facilities': ['Facilities Manager', 'Maintenance Supervisor', 'Facilities Coordinator', 'Building Manager']
+        'Facilities': ['Facilities Manager', 'Maintenance Supervisor', 'Facilities Coordinator', 'Building Manager'],
+        'R&D': ['Research Scientist', 'Lab Manager', 'Prototype Engineer', 'Innovation Lead'],
+        'Executive': ['Chief of Staff', 'VP Operations', 'Director', 'Executive Assistant'],
+        'Admin': ['Office Administrator', 'Executive Assistant', 'Reception Lead'],
     }
-    
+
     mock_employees = {}
-    num_employees = random.randint(25, 35)
-    
+    num_employees = rng.randint(38, 52)
+
     for i in range(num_employees):
         emp_id = f"emp_{i+1}"
-        dept = random.choice(departments)
-        first_name = random.choice(first_names)
-        last_name = random.choice(last_names)
+        dept = rng.choice(departments)
+        first_name = rng.choice(first_names)
+        last_name = rng.choice(last_names)
         full_name = f"{first_name} {last_name}"
-        
-        # Get position based on department
+
         positions = positions_by_dept.get(dept, ['Manager', 'Specialist', 'Coordinator'])
-        position = random.choice(positions)
-        
-        # Email variations
+        position = rng.choice(positions)
+
         email_formats = [
             f"{first_name.lower()}.{last_name.lower()}@company.com",
             f"{first_name[0].lower()}{last_name.lower()}@company.com",
             f"{first_name.lower()}{last_name[0].lower()}@company.com",
-            f"{first_name.lower()}{random.randint(1, 99)}@company.com"
+            f"{first_name.lower()}{rng.randint(1, 99)}@company.com",
         ]
-        
+
         mock_employees[emp_id] = {
             'name': full_name,
-            'email': random.choice(email_formats),
+            'email': rng.choice(email_formats),
             'department': dept,
             'position': position,
-            'employee_id': f"EMP{random.randint(1000, 9999)}",
-            'phone': f"+1-555-{random.randint(100, 999)}-{random.randint(1000, 9999)}"
+            'role': position,
+            'employee_id': f"EMP{rng.randint(1000, 9999)}",
+            'phone': f"+1-555-{rng.randint(100, 999)}-{rng.randint(1000, 9999)}",
         }
-    
+
+    _MOCK_EMPLOYEES_CACHE = mock_employees
     return mock_employees
 
 def get_mock_rooms():
@@ -661,6 +738,11 @@ def get_mock_rooms():
         'room_3': {'name': 'Meeting Room 101', 'capacity': 4, 'floor': 1, 'amenities': 'Whiteboard'},
         'room_4': {'name': 'Meeting Room 102', 'capacity': 4, 'floor': 1, 'amenities': 'None'},
         'room_5': {'name': 'Board Room', 'capacity': 20, 'floor': 2, 'amenities': 'Projector, Video call, Whiteboard'},
+        'room_6': {'name': 'Innovation Lab', 'capacity': 8, 'floor': 2, 'amenities': 'Whiteboard, Video wall'},
+        'room_7': {'name': 'Executive Suite', 'capacity': 12, 'floor': 3, 'amenities': 'Premium AV, Catering'},
+        'room_8': {'name': 'Training Hall', 'capacity': 40, 'floor': 1, 'amenities': 'PA system, Mic'},
+        'room_9': {'name': 'Phone Booth Cluster', 'capacity': 2, 'floor': 2, 'amenities': 'Sound dampening'},
+        'room_10': {'name': 'Town Hall', 'capacity': 80, 'floor': 1, 'amenities': 'Stage, Projector'},
     }
 
 # In-memory cache for mock meeting rooms (CRUD updates this; resets on app restart)
