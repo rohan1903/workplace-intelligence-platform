@@ -828,6 +828,56 @@ def _get_occupied_room_ids():
     return occupied
 
 
+def _sorted_visits_newest_first(visits):
+    """Return [(datetime, visit_id, visit_data), ...] newest first; skips visits without a parseable timestamp."""
+    if not visits:
+        return []
+    sorted_visits = []
+    for visit_id, visit_data in visits.items():
+        visit_timestamp = visit_data.get('created_at') or visit_data.get('check_in_time')
+        if visit_timestamp:
+            try:
+                visit_dt = datetime.strptime(visit_timestamp, "%Y-%m-%d %H:%M:%S")
+                sorted_visits.append((visit_dt, visit_id, visit_data))
+            except ValueError:
+                continue
+    sorted_visits.sort(key=lambda x: x[0], reverse=True)
+    return sorted_visits
+
+
+def _extract_visitor_room(visitor_data, rooms_map):
+    """Room from the most recent visit (registration choice), else root visitor room_id. Returns (room_id, display_label)."""
+    visits = visitor_data.get('visits') or {}
+    room_id = (visitor_data.get('room_id') or '').strip()
+    sorted_visits = _sorted_visits_newest_first(visits)
+    if sorted_visits:
+        rid = (sorted_visits[0][2].get('room_id') or '').strip()
+        if rid:
+            room_id = rid
+    if not room_id:
+        return '', '—'
+    meta = rooms_map.get(room_id) or {}
+    label = (meta.get('name') or '').strip() or room_id
+    return room_id, label
+
+
+def _registration_count_by_room(all_visitors):
+    """Per room_id: number of visitors whose latest visit selected that room at registration."""
+    counts = {}
+    if not all_visitors:
+        return counts
+    for _vid, vdata in all_visitors.items():
+        visits = vdata.get('visits') or {}
+        sorted_visits = _sorted_visits_newest_first(visits)
+        if sorted_visits:
+            rid = (sorted_visits[0][2].get('room_id') or '').strip()
+        else:
+            rid = (vdata.get('room_id') or '').strip()
+        if rid:
+            counts[rid] = counts.get(rid, 0) + 1
+    return counts
+
+
 # --------------------------
 # Analytics Functions
 # --------------------------
@@ -2841,6 +2891,7 @@ def _visitor_export_row(v):
         'name': str(v.get('name', '')),
         'contact': str(v.get('contact', '')),
         'purpose': str(v.get('purpose', '')),
+        'room': str(v.get('room_name') or '—'),
         'status': str(v.get('status', '')),
         'visit_date': str(v.get('visit_date', '')),
         'num_visits': v.get('num_visits', 0),
@@ -2864,6 +2915,7 @@ def visitors_export():
     end_date = request.args.get('end_date', '')
     time_range = request.args.get('time_range', 'all')
     now = datetime.now()
+    rooms_map = get_meeting_rooms()
     visitors_data = []
     if all_visitors:
         for vid, data in all_visitors.items():
@@ -2934,6 +2986,7 @@ def visitors_export():
             if transactions:
                 earliest_transaction = min(transactions.keys())
                 registered_at = transactions[earliest_transaction].get('timestamp', 'N/A')
+            room_id, room_name = _extract_visitor_room(data, rooms_map)
             visitors_data.append({
                 'id': vid, 'unique_id': vid, 'name': visitor_name, 'contact': visitor_contact,
                 'purpose': purpose, 'status': current_status, 'exceeded': exceeded, 'blacklisted': blacklisted,
@@ -2941,7 +2994,8 @@ def visitors_export():
                 'visit_date': visit_date, 'last_visit_time': last_visit_time, 'check_in_time': check_in_time,
                 'num_visits': num_visits, 'check_out_time': None, 'expected_checkout_time': expected_checkout_time,
                 'registered_at': registered_at, 'employee_name': employee_name, 'duration': duration,
-                'photo_path': basic_info.get('photo_path', 'N/A'), 'profile_link': basic_info.get('profile_link', 'N/A')
+                'photo_path': basic_info.get('photo_path', 'N/A'), 'profile_link': basic_info.get('profile_link', 'N/A'),
+                'room_id': room_id, 'room_name': room_name,
             })
     filtered_visitors = []
     for visitor in visitors_data:
@@ -2986,10 +3040,10 @@ def visitors_export():
     export_visitors = [_visitor_export_row(v) for v in filtered_visitors]
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(['Unique ID', 'Name', 'Contact', 'Purpose', 'Status', 'Visit Date', 'Visits', 'Blacklisted', 'Blacklist Reason', 'Registered At'])
+    writer.writerow(['Unique ID', 'Name', 'Contact', 'Purpose', 'Room', 'Status', 'Visit Date', 'Visits', 'Blacklisted', 'Blacklist Reason', 'Registered At'])
     for v in export_visitors:
         writer.writerow([
-            v['unique_id'], v['name'], v['contact'], v['purpose'], v['status'], v['visit_date'],
+            v['unique_id'], v['name'], v['contact'], v['purpose'], v['room'], v['status'], v['visit_date'],
             v['num_visits'], 'Yes' if v['blacklisted'] else 'No', v['blacklist_reason'], v['registered_at']
         ])
     filename = 'visitors_report_' + datetime.now().strftime('%Y-%m-%d') + '.csv'
@@ -3007,6 +3061,7 @@ def visitors_list():
         visitors_ref = db.reference('visitors')
         all_visitors = visitors_ref.get() or {}
     visitors_data = []
+    rooms_map = get_meeting_rooms()
 
     now = datetime.now()
     
@@ -3113,6 +3168,7 @@ def visitors_list():
 
             # Use visitor ID as unique_id
             unique_id = vid
+            room_id, room_name = _extract_visitor_room(data, rooms_map)
 
             visitors_data.append({
                 'id': vid,
@@ -3136,7 +3192,9 @@ def visitors_list():
                 'employee_name': employee_name,
                 'duration': duration,
                 'photo_path': basic_info.get('photo_path', 'N/A'),
-                'profile_link': basic_info.get('profile_link', 'N/A')
+                'profile_link': basic_info.get('profile_link', 'N/A'),
+                'room_id': room_id,
+                'room_name': room_name,
             })
 
     # Apply filters
@@ -3514,6 +3572,7 @@ def visitors_list():
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visitor ID</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visitor Details</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Purpose</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Room</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Visits</th>
                                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Blacklist</th>
@@ -3545,6 +3604,12 @@ def visitors_list():
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     <div class="text-sm text-gray-900">{{ visitor.purpose }}</div>
                                     <div class="text-sm text-gray-500">{{ visitor.visit_date if visitor.visit_date != 'N/A' else 'No date' }}</div>
+                                </td>
+                                <td class="px-6 py-4 whitespace-nowrap">
+                                    <div class="text-sm text-gray-900">{{ visitor.room_name }}</div>
+                                    {% if visitor.room_id %}
+                                    <div class="text-xs text-gray-400 font-mono">{{ visitor.room_id }}</div>
+                                    {% endif %}
                                 </td>
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     {% set status_config = {
@@ -3699,6 +3764,7 @@ def _build_visitor_list_from_raw(all_visitors):
     """Build list of visitor dicts from raw all_visitors (same extraction as visitors_list). Includes email and company for verbose views."""
     visitors_data = []
     now = datetime.now()
+    rooms_map = get_meeting_rooms()
     if not all_visitors:
         return visitors_data
     for vid, data in all_visitors.items():
@@ -3776,6 +3842,7 @@ def _build_visitor_list_from_raw(all_visitors):
         if transactions:
             earliest_transaction = min(transactions.keys())
             registered_at = transactions[earliest_transaction].get('timestamp', 'N/A')
+        room_id, room_name = _extract_visitor_room(data, rooms_map)
         visitors_data.append({
             'id': vid,
             'unique_id': vid,
@@ -3801,7 +3868,9 @@ def _build_visitor_list_from_raw(all_visitors):
             'employee_name': employee_name,
             'duration': duration,
             'photo_path': basic_info.get('photo_path', 'N/A'),
-            'profile_link': basic_info.get('profile_link', 'N/A')
+            'profile_link': basic_info.get('profile_link', 'N/A'),
+            'room_id': room_id,
+            'room_name': room_name,
         })
     return visitors_data
 
@@ -4466,6 +4535,9 @@ def visitor_detail(visitor_id):
         # Return a 404 error if the ID is not found in the database
         return abort(404, description="Visitor record not found.")
 
+    rooms_map = get_meeting_rooms()
+    room_id, room_name = _extract_visitor_room(visitor_data, rooms_map)
+
     # 2. Extract data from the updated storage structure
     basic_info = visitor_data.get('basic_info', {})
     
@@ -4573,6 +4645,10 @@ def visitor_detail(visitor_id):
     # Prepare visit history for display
     visit_history = []
     for visit_id, visit in visits.items():
+        vrid = (visit.get('room_id') or '').strip()
+        vroom_label = '—'
+        if vrid:
+            vroom_label = (rooms_map.get(vrid) or {}).get('name', '').strip() or vrid
         visit_history.append({
             'id': visit_id,
             'purpose': visit.get('purpose', 'N/A'),
@@ -4583,7 +4659,9 @@ def visitor_detail(visitor_id):
             'expected_checkout_time': visit.get('expected_checkout_time', 'N/A'),
             'duration': visit.get('duration', 'N/A'),
             'status': visit.get('status', 'N/A'),
-            'created_at': visit.get('created_at', 'N/A')
+            'created_at': visit.get('created_at', 'N/A'),
+            'room_id': vrid,
+            'room_name': vroom_label,
         })
     
     # Sort visit history by date (newest first)
@@ -4611,7 +4689,9 @@ def visitor_detail(visitor_id):
         'check_out_time': check_out_time,
         'expected_checkout_time': expected_checkout_time,
         'registered_at': registered_at,
-        'image_path': image_path
+        'image_path': image_path,
+        'room_id': room_id,
+        'room_name': room_name,
     }
 
     # 3. HTML Template for Detailed View
@@ -4959,6 +5039,21 @@ def visitor_detail(visitor_id):
                                     </div>
                                 </div>
                             </div>
+                            
+                            <div class="bg-gray-50 rounded-xl p-4 card-hover">
+                                <div class="flex items-center space-x-3">
+                                    <div class="w-10 h-10 bg-teal-100 rounded-lg flex items-center justify-center">
+                                        <i class="fas fa-door-open text-teal-600"></i>
+                                    </div>
+                                    <div>
+                                        <p class="text-sm text-gray-500">Meeting room</p>
+                                        <p class="font-semibold text-gray-900">{{ visitor.room_name }}</p>
+                                        {% if visitor.room_id %}
+                                        <p class="text-xs text-gray-400 font-mono mt-0.5">{{ visitor.room_id }}</p>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Visit Timeline -->
@@ -5122,7 +5217,7 @@ def visitor_detail(visitor_id):
                                         </span>
                                     </div>
                                     
-                                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 text-sm">
                                         <div>
                                             <p class="text-gray-500">Purpose</p>
                                             <p class="font-medium text-gray-900">{{ visit.purpose }}</p>
@@ -5130,6 +5225,10 @@ def visitor_detail(visitor_id):
                                         <div>
                                             <p class="text-gray-500">Employee</p>
                                             <p class="font-medium text-gray-900">{{ visit.employee_name if visit.employee_name != 'N/A' else 'Not specified' }}</p>
+                                        </div>
+                                        <div>
+                                            <p class="text-gray-500">Room</p>
+                                            <p class="font-medium text-gray-900">{{ visit.room_name }}</p>
                                         </div>
                                         <div>
                                             <p class="text-gray-500">Duration</p>
@@ -5494,6 +5593,11 @@ def rooms_list():
     rooms = get_meeting_rooms()
     rooms_list_data = [{'id': rid, **data} for rid, data in rooms.items()]
     occupied_room_ids = _get_occupied_room_ids()
+    if USE_MOCK_DATA:
+        all_visitors_for_rooms = get_mock_visitors()
+    else:
+        all_visitors_for_rooms = db.reference('visitors').get() or {}
+    registration_by_room = _registration_count_by_room(all_visitors_for_rooms)
     ROOMS_HTML = """
     <!DOCTYPE html>
     <html lang="en">
@@ -5510,7 +5614,7 @@ def rooms_list():
                 <div>
                     <a href="/" class="text-blue-600 hover:underline text-sm mb-2 inline-block"><i class="fas fa-arrow-left mr-1"></i>Back to Admin</a>
                     <h1 class="text-2xl font-bold text-gray-900">Meeting Rooms</h1>
-                    <p class="text-gray-500 text-sm">Add, edit, or remove rooms. Capacity and amenities are used for suggestions and analytics.</p>
+                    <p class="text-gray-500 text-sm">Add, edit, or remove rooms. &quot;Registered&quot; counts visitors whose latest visit selected that room when registering. Available/Occupied reflects check-in status.</p>
                 </div>
                 <button onclick="openAddModal()" class="bg-teal-600 hover:bg-teal-700 text-white px-4 py-2 rounded-lg flex items-center">
                     <i class="fas fa-plus mr-2"></i>Add Room
@@ -5528,6 +5632,7 @@ def rooms_list():
                             </span>
                         </div>
                         <dl class="space-y-1 text-sm text-gray-600">
+                            <div><span class="text-gray-500">Registered selection</span> <span class="font-semibold text-gray-800">{{ registration_by_room.get(r.id, 0) }}</span> <span class="text-gray-400">visitor(s)</span></div>
                             <div><span class="text-gray-500">Capacity</span> {{ r.capacity or '-' }}</div>
                             <div><span class="text-gray-500">Floor</span> {{ r.floor or '-' }}</div>
                             <div><span class="text-gray-500">Amenities</span> {{ (r.amenities or '-')[:50] }}{% if (r.amenities or '')|length > 50 %}...{% endif %}</div>
@@ -5643,7 +5748,7 @@ def rooms_list():
     </body>
     </html>
     """
-    return render_template_string(ROOMS_HTML, rooms_list_data=rooms_list_data, occupied_room_ids=occupied_room_ids)
+    return render_template_string(ROOMS_HTML, rooms_list_data=rooms_list_data, occupied_room_ids=occupied_room_ids, registration_by_room=registration_by_room)
 
 @app.route('/api/rooms', methods=['POST'])
 def api_rooms_create():
@@ -5681,9 +5786,19 @@ def api_rooms_delete(room_id):
 
 @app.route('/api/rooms/list')
 def api_rooms_list():
-    """Return all meeting rooms (for registration app or other consumers)."""
+    """Return all meeting rooms (for registration app or other consumers). Each value includes registration_count from latest visit room selection."""
     rooms = get_meeting_rooms()
-    return jsonify(dict(rooms))
+    if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+    else:
+        all_visitors = db.reference('visitors').get() or {}
+    counts = _registration_count_by_room(all_visitors)
+    out = {}
+    for rid, meta in rooms.items():
+        row = dict(meta)
+        row['registration_count'] = int(counts.get(rid, 0))
+        out[rid] = row
+    return jsonify(out)
 
 
 @app.route('/api/notify_host_time_exceeded', methods=['POST'])
