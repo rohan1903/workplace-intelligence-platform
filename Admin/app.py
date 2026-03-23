@@ -20,7 +20,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
 from flask import Flask, render_template, render_template_string, request, redirect, url_for, flash, jsonify, make_response
 import pandas as pd
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 try:
     import firebase_admin
     from firebase_admin import credentials, db
@@ -60,7 +60,23 @@ except Exception as e:
 # Environment & Flask Setup
 # --------------------------
 _admin_dir = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(_admin_dir, ".env"))
+_admin_env_path = os.path.join(_admin_dir, ".env")
+_admin_firebase_cred_path = os.path.join(_admin_dir, "firebase_credentials.json")
+load_dotenv(_admin_env_path)
+
+
+def _parse_env_bool(value, default=True):
+    """Parse typical truthy/falsey strings; empty or unknown falls back to *default*."""
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes", "on"):
+        return True
+    if s in ("false", "0", "no", "off"):
+        return False
+    return default
+
+
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "default_secret_for_testing")
 app.config['UPLOAD_FOLDER'] = 'UPLOADS'
@@ -69,27 +85,34 @@ os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 # --------------------------
 # Firebase Initialization (Optional - uses mock data if unavailable)
 # --------------------------
-# To switch to real Firebase: Set USE_MOCK_DATA = False and ensure firebase_credentials.json exists
-USE_MOCK_DATA = os.getenv('USE_MOCK_DATA', 'True').lower() == 'true'  # Default to True (mock data)
+# To switch to real Firebase: set USE_MOCK_DATA=false in admin/.env and add firebase_credentials.json
+# If USE_MOCK_DATA is set in admin/.env, that wins over a conflicting OS/user environment variable
+# (load_dotenv alone does not override existing env vars).
+_dotenv_file = dotenv_values(_admin_env_path)
+_raw_mock = _dotenv_file.get("USE_MOCK_DATA")
+if _raw_mock is not None and str(_raw_mock).strip() != "":
+    USE_MOCK_DATA = _parse_env_bool(_raw_mock, default=True)
+else:
+    USE_MOCK_DATA = _parse_env_bool(os.getenv("USE_MOCK_DATA"), default=True)
 
 if FIREBASE_AVAILABLE and not USE_MOCK_DATA:
     try:
-        if os.path.exists("firebase_credentials.json"):
-            cred = credentials.Certificate("firebase_credentials.json")
+        if os.path.exists(_admin_firebase_cred_path):
+            cred = credentials.Certificate(_admin_firebase_cred_path)
             database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
             firebase_admin.initialize_app(cred, {"databaseURL": database_url})
             print("[OK] Firebase initialized successfully - Using REAL data")
         else:
             USE_MOCK_DATA = True
             print("[!] Firebase credentials not found. Using mock data for demonstration.")
-            print("[*] To use real Firebase: Add firebase_credentials.json and set USE_MOCK_DATA=False")
+            print(f"[*] Expected file: {_admin_firebase_cred_path}")
+            print("[*] To use real Firebase: Add firebase_credentials.json next to admin app.py and set USE_MOCK_DATA=False")
     except Exception as e:
         USE_MOCK_DATA = True
         print(f"[!] Firebase initialization failed: {e}. Using mock data for demonstration.")
 elif USE_MOCK_DATA:
-    print("[*] Using MOCK DATA for demonstration")
-    print("[*] To switch to real Firebase: Set environment variable USE_MOCK_DATA=False")
-    print("   Example: export USE_MOCK_DATA=False")
+    print("[*] Using MOCK DATA — /visitors and /dashboard use generated demo records (not Firebase).")
+    print("[*] For live Firebase: set USE_MOCK_DATA=false in admin/.env (and ensure credentials exist).")
 else:
     USE_MOCK_DATA = True
     print("[!] Firebase not available. Using mock data for demonstration.")
@@ -5171,11 +5194,6 @@ def visitor_detail(visitor_id):
                                         class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
                                     <i class="fas fa-print mr-2"></i> Print Record
                                 </button>
-                                <a href="{{ registration_app_url }}/check_in?visitor_id={{ visitor.id }}"
-                                   target="_blank"
-                                   class="w-full bg-cyan-600 hover:bg-cyan-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center text-center">
-                                    <i class="fas fa-qrcode mr-2"></i> View QR / Check-in page
-                                </a>
                                 <button onclick="window.location.href='/visitors'"
                                         class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
                                     <i class="fas fa-arrow-left mr-2"></i> Back to Visitors
@@ -6594,6 +6612,9 @@ if __name__ == "__main__":
     print("Starting Admin Dashboard...")
     print("="*50)
     print("Dashboard URL: http://localhost:5000")
-    print("Using mock data (no Firebase required)")
+    if USE_MOCK_DATA:
+        print("Data source: MOCK (generated visitors — not Firebase)")
+    else:
+        print("Data source: Firebase (live)")
     print("="*50 + "\n")
     app.run(host='0.0.0.0', port=5000, debug=True)

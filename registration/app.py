@@ -133,6 +133,112 @@ MSG_BLACKLISTED = (
     "You have been blacklisted and cannot schedule new visits. "
     "Please contact security or reception."
 )
+# Same neutral copy as verify_face when blacklisted vs non-blacklisted faces are ambiguous (twins).
+MSG_REGISTRATION_FACE_AMBIGUOUS = (
+    "We could not confidently verify your identity. "
+    "Please contact reception or use your registered email."
+)
+
+
+def _registration_biometric_blacklist_block(live_embedding, db_ref):
+    """Block registration if the captured face matches a blacklisted visitor (twin-aware).
+
+    Mirrors verify_face's no-email path: VERIFICATION_THRESHOLD, fixed TWIN_GAP=0.08.
+
+    Returns:
+        (deny, user_message, blacklist_reason_or_none)
+        If deny and user_message == MSG_BLACKLISTED, the third value is for notification email.
+    """
+    if db_ref is None:
+        return False, None, None
+    if live_embedding is None:
+        return False, None, None
+    le = np.asarray(live_embedding, dtype=np.float64).flatten()
+    if le.size != 128:
+        logger.warning(
+            "registration biometric blacklist: skip (embedding size %s, expected 128)", le.size
+        )
+        return False, None, None
+
+    try:
+        threshold = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))
+    except ValueError:
+        threshold = 0.65
+    twin_gap = 0.08
+
+    try:
+        all_visitors = db_ref.child("visitors").get() or {}
+    except Exception as e:
+        logger.error("registration biometric blacklist: failed to load visitors: %s", e)
+        return False, None, None
+
+    candidates = []
+    for vid, vdata in all_visitors.items():
+        if not isinstance(vdata, dict):
+            continue
+        basic = vdata.get("basic_info") or {}
+        if not isinstance(basic, dict):
+            basic = {}
+        emb_str = basic.get("embedding")
+        if not emb_str:
+            continue
+        try:
+            stored = np.array([float(x) for x in str(emb_str).strip().split()], dtype=np.float64)
+            if stored.size != le.size:
+                continue
+            dist = float(np.linalg.norm(le - stored))
+            is_bl = _visitor_basic_is_blacklisted(basic, vdata)
+            candidates.append(
+                {
+                    "visitor_id": vid,
+                    "distance": dist,
+                    "is_blacklisted": is_bl,
+                    "name": basic.get("name", "Unknown"),
+                }
+            )
+        except Exception as ex:
+            logger.error("registration biometric blacklist: embedding error for %s: %s", vid, ex)
+            continue
+
+    if not candidates:
+        return False, None, None
+
+    candidates.sort(key=lambda c: c["distance"])
+    best = candidates[0]
+    min_distance = best["distance"]
+    if min_distance > threshold:
+        return False, None, None
+
+    second = candidates[1] if len(candidates) > 1 else None
+    gap = abs(second["distance"] - best["distance"]) if second is not None else float("inf")
+
+    # Ambiguous: blacklisted vs non-blacklisted within twin gap (same as verify_face Case B).
+    if (
+        second is not None
+        and gap < twin_gap
+        and (best["is_blacklisted"] != second["is_blacklisted"])
+    ):
+        logger.warning(
+            "Registration blocked: ambiguous face between blacklisted and non-blacklisted (gap=%.4f).",
+            gap,
+        )
+        return True, MSG_REGISTRATION_FACE_AMBIGUOUS, None
+
+    # Unambiguous blacklisted match: best is blacklisted and clearly wins, or both top matches are blacklisted.
+    if best["is_blacklisted"]:
+        if second is None or gap >= twin_gap or second["is_blacklisted"]:
+            vid_bl = best["visitor_id"]
+            bi = (all_visitors.get(vid_bl) or {}).get("basic_info") or {}
+            reason = bi.get("blacklist_reason", "Security restriction")
+            logger.warning(
+                "Registration blocked: face matches blacklisted visitor %s (dist=%.4f).",
+                vid_bl,
+                min_distance,
+            )
+            return True, MSG_BLACKLISTED, reason
+
+    return False, None, None
+
 
 def collect_department_choices():
     """Sorted unique departments: defaults plus any department strings on employee records."""
@@ -532,6 +638,29 @@ def send_custom_email(recipient_email, subject, body):
     except Exception as e:
         logger.error(f"General Email error during custom send: {e}")
         return False
+
+
+def send_blacklist_registration_denial_email(recipient_email, visitor_name, blacklist_reason):
+    """Email the visitor when registration is denied for blacklist (email account or biometric match)."""
+    if not recipient_email:
+        return
+    reason = (blacklist_reason or "Security restriction").strip() or "Security restriction"
+    subject = "Your visit has been rejected – you are blacklisted"
+    body_lines = [
+        f"Hello {visitor_name},",
+        "",
+        "Our records show that you have been placed on the visitor blacklist,",
+        "so new visit registrations cannot be created for you.",
+        f"Reason: {reason}",
+        "",
+        "If you believe this is a mistake, please contact security or reception.",
+    ]
+    body = "\n".join(body_lines)
+    try:
+        send_custom_email(recipient_email, subject, body)
+    except Exception as mail_err:
+        logger.error(f"Error sending blacklist registration denial email: {mail_err}")
+
 
 # ──────────────────────────────────────────────
 # QR Code Generation Helpers
@@ -995,33 +1124,20 @@ def finalize_registration():
         # If this email belongs to an already blacklisted visitor, block new registrations
         if is_blacklisted:
             logger.warning(f"Blocked registration attempt for blacklisted visitor {visitor_id} ({email}).")
-            try:
-                blacklist_reason = (existing_basic or {}).get("blacklist_reason", "Security restriction")
-                if email:
-                    subject = "Your visit has been rejected – you are blacklisted"
-                    body_lines = [
-                        f"Hello {name},",
-                        "",
-                        "Our records show that you have been placed on the visitor blacklist,",
-                        "so new visit registrations cannot be created for you.",
-                    ]
-                    if blacklist_reason:
-                        body_lines.append(f"Reason: {blacklist_reason}")
-                    body_lines.extend(
-                        [
-                            "",
-                            "If you believe this is a mistake, please contact security or reception.",
-                        ]
-                    )
-                    body = "\n".join(body_lines)
-                    send_custom_email(email, subject, body)
-            except Exception as mail_err:
-                logger.error(f"Error sending blacklist rejection email: {mail_err}")
+            blacklist_reason = (existing_basic or {}).get("blacklist_reason", "Security restriction")
+            send_blacklist_registration_denial_email(email, name, blacklist_reason)
 
             return jsonify({
                 "success": False,
                 "message": MSG_BLACKLISTED,
             }), 403
+
+        # Biometric blacklist: same person cannot bypass blacklist by registering with a new email.
+        bio_deny, bio_msg, bio_reason = _registration_biometric_blacklist_block(embedding_array, db_ref)
+        if bio_deny:
+            if bio_msg == MSG_BLACKLISTED:
+                send_blacklist_registration_denial_email(email, name, bio_reason)
+            return jsonify({"success": False, "message": bio_msg}), 403
 
         # Create or update visitor and create visit in Firebase (may raise NotFoundError if Realtime Database not created)
         try:
@@ -1660,6 +1776,9 @@ def employee_action_reschedule(visitor_id):
 @app.route("/verify")
 def verify_page():
     logger.info("Verify page accessed")
+    # Returning flow: email step set expected_visitor_id; never reuse a stale visitor_id here.
+    if session.get("expected_visitor_id"):
+        session.pop("visitor_id", None)
     return render_template('verify.html')
 
 
@@ -1717,6 +1836,9 @@ def verify_email_page():
             logger.warning(f"verify_email_page: visitor {chosen_id} already checked in; blocked returning registration.")
             return render_template("verify_email.html", error=MSG_ACTIVE_CHECK_IN, email=email)
 
+        # Drop any prior visitor_id so a failed face verify cannot still open /returning_visitor
+        # with someone else's (or an outdated) session binding.
+        session.pop("visitor_id", None)
         session["expected_visitor_id"] = chosen_id
         session["returning_email"] = email
         logger.info(f"verify_email_page matched email {email} to visitor {chosen_id}")
@@ -1765,7 +1887,14 @@ def verify_face():
         expected_id = session.get("expected_visitor_id")
         matched_id, min_distance = None, float('inf')
 
-        THRESHOLD = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))  # 0.65 more lenient for real-world
+        # Open verify (no email): lenient. Returning visitor (email matched): stricter to reduce false accepts.
+        base_threshold = float(os.environ.get("VERIFICATION_THRESHOLD", "0.65"))
+        if expected_id:
+            THRESHOLD = float(
+                os.environ.get("VERIFICATION_THRESHOLD_RETURNING", "0.52")
+            )
+        else:
+            THRESHOLD = base_threshold
         TWIN_GAP = 0.08  # if two matches are within this, treat as ambiguous
 
         if expected_id:
@@ -1786,7 +1915,6 @@ def verify_face():
                     if len(stored_emb) == len(live_embedding):
                         expected_dist = np.linalg.norm(live_embedding - stored_emb)
                         min_distance = expected_dist
-                        matched_id = expected_id
                     else:
                         logger.warning(
                             f"Embedding dimension mismatch for expected visitor {expected_id}: "
@@ -2042,6 +2170,9 @@ def verify_face():
 
 @app.route("/returning_visitor", methods=["GET", "POST"])
 def returning_visitor():
+    # Must complete face verify after verify_email; block stale visitor_id-only sessions.
+    if session.get("expected_visitor_id"):
+        return redirect("/verify")
     visitor_id = session.get("visitor_id")
     if not visitor_id:
         logger.warning("No visitor_id in session for returning_visitor, redirecting to verify")

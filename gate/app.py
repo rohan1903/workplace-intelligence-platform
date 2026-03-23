@@ -501,6 +501,24 @@ def verify_by_distance(live_embedding):
 
 # --- Email Functions ---
 
+def absolute_feedback_link(visitor_id):
+    """Full URL to the feedback form (emails, bookmarks). Set GATE_PUBLIC_URL when behind a proxy."""
+    base = (os.environ.get("GATE_PUBLIC_URL") or "").strip().rstrip("/")
+    if not base:
+        base = request.url_root.rstrip("/")
+    rel = url_for("feedback_form", visitor_id=visitor_id)
+    if not rel.startswith("/"):
+        rel = "/" + rel
+    return f"{base}{rel}"
+
+
+def _is_plausible_visitor_email(email):
+    e = (email or "").strip().lower()
+    if not e or e in ("n/a", "none", "unknown", "not provided", "no email"):
+        return False
+    return "@" in e
+
+
 def send_feedback_email(visitor_email, visitor_name, feedback_link):
     """Send feedback request email to visitor after check-out"""
     logger.info(f"Attempting to send feedback email to: {visitor_email}")
@@ -1195,21 +1213,47 @@ def checkin_verify_and_log():
             })
 
         if is_twin and has_qr:
-            # Twin ambiguity detected with QR present.
-            # SECURITY RULE: never override face_visitor_id with qr_visitor_id.
-            # The geometric best face match is the source of truth for identity;
-            # QR confirms it (step D below) but never replaces it.
+            # Twin / near-duplicate ambiguity: two (or more) embeddings score similarly.
+            # Geometric rank alone cannot tell identical twins or duplicate registrations apart.
+            # When the scanned QR's visitor is one of the ambiguous top pair, trust the QR
+            # for identity so the correct twin/account can check in/out. If the QR owner is
+            # not in that pair, step D still denies (e.g. stolen QR while face matches others).
             twin_candidate_ids = {m["visitor_id"] for m in twin_matches}
             if qr_visitor_id not in twin_candidate_ids:
                 logger.warning(
                     f"Twin ambiguity among {twin_candidate_ids} but QR is for {qr_visitor_id}; "
                     "face/QR mismatch will be caught in step D."
                 )
-            elif face_visitor_id != qr_visitor_id:
+            elif requested_action == "checkout" and face_visitor_id != qr_visitor_id:
+                # Checkout is more sensitive: do NOT resolve ambiguous twin cases by QR alone.
+                # This prevents an incorrect checkout when face evidence is not decisive.
                 logger.warning(
-                    f"Twin ambiguity: geometric best is {face_visitor_id} but QR is for "
-                    f"{qr_visitor_id}; refusing QR override — step D will deny."
+                    f"Twin ambiguity at checkout between {twin_candidate_ids}; "
+                    f"geometric best={face_visitor_id}, qr_owner={qr_visitor_id}. Denying."
                 )
+                log_security_alert(
+                    "TWIN_CHECKOUT_AMBIGUOUS",
+                    db_ref,
+                    qr_visitor_id=qr_visitor_id,
+                    face_visitor_id=face_visitor_id,
+                    qr_visit_id=qr_visit_id,
+                    candidates=list(twin_candidate_ids),
+                    ip=client_ip,
+                    message="Ambiguous twin/near-duplicate face at checkout; QR disambiguation disabled.",
+                )
+                return jsonify({
+                    "status": "denied",
+                    "message": "Ambiguous face match at check-out. Please retry with a clearer face capture or contact reception.",
+                    "distance": round(min_distance, 4)
+                })
+            elif face_visitor_id != qr_visitor_id:
+                qr_row = next(m for m in twin_matches if m["visitor_id"] == qr_visitor_id)
+                logger.info(
+                    f"Twin ambiguity: disambiguating via QR — accepting {qr_visitor_id} "
+                    f"(geometric best was {face_visitor_id})."
+                )
+                face_visitor_id = qr_visitor_id
+                min_distance = qr_row["distance"]
             else:
                 logger.info(
                     f"Twin ambiguity resolved: geometric best and QR both identify {qr_visitor_id}."
@@ -1230,15 +1274,24 @@ def checkin_verify_and_log():
             log_qr_scan(qr_visitor_id, qr_visit_id, "rejected", db_ref,
                         reason="face_mismatch", face_visitor_id=face_visitor_id, ip=client_ip)
 
-            # Invalidate the stolen QR
-            invalidate_qr(qr_visitor_id, qr_visit_id,
-                          "Presented by wrong person (face mismatch)", db_ref)
-            log_protocol_event("invalidation", auth_mode, visitor_id=qr_visitor_id, visit_id=qr_visit_id,
-                               reason="face_mismatch", face_visitor_id=face_visitor_id, ip=client_ip)
+            # Decide whether to invalidate:
+            # - During check-in stage (registered/approved), keep QR usable for the legitimate owner.
+            # - During checkout stage (checked_in), invalidate to block repeated misuse.
+            qr_visit_status = str((qr_visit_data or {}).get("status", "")).strip().lower()
+            should_invalidate = qr_visit_status == "checked_in"
+            if should_invalidate:
+                invalidate_qr(qr_visitor_id, qr_visit_id,
+                              "Presented by wrong person (face mismatch)", db_ref)
+                log_protocol_event("invalidation", auth_mode, visitor_id=qr_visitor_id, visit_id=qr_visit_id,
+                                   reason="face_mismatch", face_visitor_id=face_visitor_id, ip=client_ip)
 
             return jsonify({
                 "status": "denied",
-                "message": "Security alert: QR code does not belong to you. Security has been notified.",
+                "message": (
+                    "Security alert: QR code does not belong to you. Security has been notified."
+                    if should_invalidate
+                    else "Face and QR do not match. Please use your own QR and face."
+                ),
                 "distance": round(min_distance, 4)
             })
 
@@ -1641,18 +1694,28 @@ def process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
             "auth_mode": auth_mode,
         })
 
-        # ── Emails ──
-        if visitor_email:
+        # ── Feedback invite (email when possible; success page always shows link too) ──
+        feedback_link = absolute_feedback_link(visitor_id)
+        if _is_plausible_visitor_email(visitor_email):
             try:
-                feedback_link = request.url_root.rstrip("/") + url_for("feedback_form", visitor_id=visitor_id)
-                email_sent, _ = send_feedback_email(visitor_email, visitor_name, feedback_link)
+                email_sent, email_err = send_feedback_email(visitor_email, visitor_name, feedback_link)
                 if email_sent:
                     logger.info(f"Feedback email sent to {visitor_email}")
+                else:
+                    logger.warning(f"Feedback email not sent ({email_err}). Link: {feedback_link}")
             except Exception as e:
                 logger.error(f"Error sending feedback email: {e}")
+        else:
+            logger.info(
+                f"No usable visitor email for feedback after checkout; use success-page link. "
+                f"visitor_id={visitor_id} link={feedback_link}"
+            )
 
-            if final_status == "exceeded":
+        if final_status == "exceeded" and _is_plausible_visitor_email(visitor_email):
+            try:
                 send_exceeded_email(visitor_email, visitor_name)
+            except Exception as e:
+                logger.error(f"Error sending exceeded email: {e}")
 
         # ── Build message ──
         message = f"Successful checkout of {visitor_name}. Time spent: {time_spent}"
@@ -1669,6 +1732,7 @@ def process_checkout(visitor_id, visit_id, visitor_name, visitor_email,
         return jsonify({
             "status": "checked_out",
             "name": visitor_name,
+            "visitor_id": visitor_id,
             "message": message,
             "distance": round(float(min_distance), 4),
             "redirect_url": url_for("checkin_success", name=visitor_name,
@@ -1716,12 +1780,12 @@ def feedback_form():
 @app.route('/submit_feedback', methods=['POST'])
 def submit_feedback():
     visitor_id = request.form.get('visitor_id')
-    feedback_text = request.form.get('feedback_text')
+    feedback_text = (request.form.get('feedback_text') or request.form.get('feedback_text_manual') or "").strip()
 
     if not visitor_id:
         return "Missing visitor ID.", 400
 
-    if not feedback_text or feedback_text.strip() == "":
+    if not feedback_text:
         return render_template('feedback_form.html', visitor_id=visitor_id, error="Feedback cannot be empty!")
 
     try:

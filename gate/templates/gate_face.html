@@ -248,7 +248,12 @@
                 stopVerifyLoop();
                 if (faceCheckIntervalId) { clearInterval(faceCheckIntervalId); faceCheckIntervalId = null; }
                 setTimeout(() => {
-                    window.location.href = data.redirect_url || `/checkin_success?name=${encodeURIComponent(data.name)}&action=checked%20out`;
+                    if (data.redirect_url) {
+                        window.location.href = data.redirect_url;
+                    } else {
+                        const vid = data.visitor_id ? `&visitor_id=${encodeURIComponent(data.visitor_id)}` : '';
+                        window.location.href = `/checkin_success?name=${encodeURIComponent(data.name || '')}&action=checked%20out${vid}`;
+                    }
                 }, 1500);
             }
             else if (data.status === 'denied' || data.status === 'error') {

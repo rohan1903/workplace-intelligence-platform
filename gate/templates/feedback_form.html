@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Workplace Intelligence Platform - Voice Feedback</title>
+    <title>Workplace Intelligence Platform - Visit Feedback</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
@@ -17,9 +17,9 @@
 
     <div class="w-full max-w-2xl bg-white shadow-2xl rounded-xl p-6 md:p-10 text-center">
         <h1 class="text-3xl font-extrabold text-blue-700 mb-2">
-            Voice Feedback
+            Visit feedback
         </h1>
-        <p class="text-gray-500 mb-6">Tap the button and speak your thoughts clearly.</p>
+        <p class="text-gray-500 mb-6">Share your comments in the box below.</p>
 
         {% if error %}
         <div class="mb-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 text-left">
@@ -33,159 +33,21 @@
             </p>
         {% endif %}
 
-        <!-- Control Buttons -->
-        <div class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4 mb-8">
-            <button id="startBtn" 
-                    class="flex-1 px-6 py-3 bg-green-500 text-white font-semibold rounded-lg shadow-md hover:bg-green-600 transition duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed">
-                Start Recording
-            </button>
-            <button id="stopBtn" disabled
-                    class="flex-1 px-6 py-3 bg-red-500 text-white font-semibold rounded-lg shadow-md hover:bg-red-600 transition duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed">
-                Stop
-            </button>
-            <button id="retakeBtn" disabled
-                    class="flex-1 px-6 py-3 bg-yellow-500 text-white font-semibold rounded-lg shadow-md hover:bg-yellow-600 transition duration-300 transform hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed">
-                Retake
-            </button>
-        </div>
-
-        <!-- Transcript Display Area -->
-        <div id="transcript" 
-             class="w-full mx-auto p-5 border-2 border-dashed border-gray-300 rounded-xl bg-gray-50 text-left text-gray-700 min-h-[120px] mb-8 shadow-inner overflow-y-auto" 
-             placeholder="Your speech will appear here...">
-            <span class="text-gray-400">Recording is stopped. Click "Start Recording" to begin.</span>
-        </div>
-
-        <!-- Submission Form -->
-        <form method="POST" action="/submit_feedback" id="feedbackForm">
+        <form method="POST" action="/submit_feedback" id="feedbackForm" class="text-left">
             {% if visitor_id %}
                 <input type="hidden" name="visitor_id" value="{{ visitor_id }}">
             {% endif %}
-            <input type="hidden" name="feedback_text" id="feedbackText">
-            <button type="submit"
-                    class="w-full sm:w-auto px-10 py-3 bg-blue-600 text-white font-bold text-lg rounded-lg shadow-xl hover:bg-blue-700 transition duration-300 transform hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed">
-                Submit Feedback
-            </button>
+            <label for="feedbackText" class="block text-sm font-medium text-gray-700 mb-2">Your feedback</label>
+            <textarea id="feedbackText" name="feedback_text" rows="6" required
+                  class="w-full mb-6 p-4 border-2 border-gray-200 rounded-xl text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y"
+                  placeholder="How was your visit? (Required)"></textarea>
+            <div class="text-center">
+                <button type="submit"
+                        class="w-full sm:w-auto px-10 py-3 bg-blue-600 text-white font-bold text-lg rounded-lg shadow-xl hover:bg-blue-700 transition duration-300 transform hover:-translate-y-0.5">
+                    Submit Feedback
+                </button>
+            </div>
         </form>
     </div>
-
-    <!-- Custom Modal for Alerts -->
-    <div id="custom-modal" class="hidden fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
-        <div class="bg-white rounded-xl shadow-2xl p-6 w-full max-w-xs text-center">
-            <h3 class="text-xl font-bold mb-4 text-red-600">Attention</h3>
-            <p id="modal-message" class="text-gray-700 mb-6"></p>
-            <button onclick="document.getElementById('custom-modal').classList.add('hidden')"
-                    class="w-full py-2 bg-blue-500 text-white rounded-lg font-semibold hover:bg-blue-600">
-                Got It
-            </button>
-        </div>
-    </div>
-
-    <script>
-        function removeDuplicateWords(text) {
-            return text.replace(/\b(\w+)( \1\b)+/gi, '$1');
-        }
-
-        function showAlert(message) {
-            document.getElementById('modal-message').textContent = message;
-            document.getElementById('custom-modal').classList.remove('hidden');
-        }
-
-        let recognition;
-        let isRecording = false;
-        let finalTranscript = "";
-
-        const transcriptDiv = document.getElementById('transcript');
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const retakeBtn = document.getElementById('retakeBtn');
-        const feedbackText = document.getElementById('feedbackText');
-        const placeholderText = "Recording is stopped. Click \"Start Recording\" to begin.";
-
-        transcriptDiv.innerHTML = `<span class="text-gray-400">${placeholderText}</span>`;
-
-        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognition = new SpeechRecognition();
-            recognition.continuous = true;
-            recognition.interimResults = true;
-            recognition.lang = 'en-US';
-
-            recognition.onstart = () => {
-                isRecording = true;
-                transcriptDiv.innerText = "Listening...";
-                transcriptDiv.classList.remove('bg-gray-50', 'border-gray-300');
-                transcriptDiv.classList.add('bg-blue-50', 'border-blue-500', 'animate-pulse');
-            };
-
-            recognition.onresult = (event) => {
-                let interimTranscript = '';
-                for (let i = event.resultIndex; i < event.results.length; i++) {
-                    let transcript = event.results[i][0].transcript;
-                    transcript = removeDuplicateWords(transcript.trim());
-                    if (event.results[i].isFinal) {
-                        finalTranscript += " " + transcript;
-                        finalTranscript = removeDuplicateWords(finalTranscript);
-                    } else {
-                        interimTranscript += transcript;
-                    }
-                }
-                let combined = (finalTranscript + " " + interimTranscript).trim();
-                transcriptDiv.innerText = removeDuplicateWords(combined);
-            };
-
-            recognition.onerror = (event) => {
-                console.error("Speech recognition error:", event.error);
-                if (isRecording) recognition.stop();
-                showAlert(`Recording error: ${event.error}. Please try again.`);
-            };
-
-            recognition.onend = () => {
-                isRecording = false;
-                transcriptDiv.classList.remove('bg-blue-50', 'border-blue-500', 'animate-pulse');
-                transcriptDiv.classList.add('bg-gray-50', 'border-gray-300');
-                startBtn.disabled = false;
-                stopBtn.disabled = true;
-                if (finalTranscript.trim().length > 0) retakeBtn.disabled = false;
-                else transcriptDiv.innerHTML = `<span class="text-gray-400">${placeholderText}</span>`;
-            };
-        } else {
-            showAlert("Speech Recognition API is not supported in this browser. Please use Chrome or Edge.");
-            startBtn.disabled = true;
-        }
-
-        startBtn.onclick = () => {
-            if (!isRecording) {
-                finalTranscript = "";
-                transcriptDiv.innerText = "";
-                recognition.start();
-                startBtn.disabled = true;
-                stopBtn.disabled = false;
-                retakeBtn.disabled = true;
-            }
-        };
-
-        stopBtn.onclick = () => {
-            if (isRecording) recognition.stop();
-        };
-
-        retakeBtn.onclick = () => {
-            if (isRecording) recognition.stop();
-            finalTranscript = "";
-            transcriptDiv.innerHTML = `<span class="text-gray-400">${placeholderText}</span>`;
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            retakeBtn.disabled = true;
-        };
-
-        document.getElementById('feedbackForm').onsubmit = () => {
-            feedbackText.value = removeDuplicateWords(finalTranscript.trim());
-            if (!feedbackText.value) {
-                showAlert("Please record your feedback before submitting!");
-                return false;
-            }
-            return true;
-        };
-    </script>
 </body>
 </html>
