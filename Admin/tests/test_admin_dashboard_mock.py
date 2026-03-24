@@ -29,10 +29,12 @@ class AdminDashboardMockTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        admin_app.USE_MOCK_DATA = True
         cls.app = admin_app.app
         cls.app.testing = True
 
     def setUp(self):
+        admin_app.USE_MOCK_DATA = True
         admin_app._MOCK_BLACKLIST_STATE.clear()
         admin_app._mock_rooms_cache = None
         admin_app._MOCK_VISITORS_BASE = None
@@ -191,6 +193,56 @@ class AdminDashboardMockTests(unittest.TestCase):
             )
             self.assertEqual(r2.status_code, 200)
             self.assertTrue(r2.get_json().get("success"))
+
+    def test_blacklist_edit_reason_keeps_single_record(self):
+        with self.app.test_client() as c:
+            r1 = c.post(
+                "/blacklist/visitor_1",
+                data=json.dumps({"blacklisted": True, "reason": "first"}),
+                content_type="application/json",
+            )
+            self.assertEqual(r1.status_code, 200)
+            state1 = dict(admin_app._MOCK_BLACKLIST_STATE.get("visitor_1") or {})
+            self.assertTrue(state1.get("blacklisted"))
+            self.assertEqual(state1.get("reason"), "first")
+            ts1 = state1.get("blacklisted_at")
+            self.assertTrue(ts1)
+
+            # Edit reason while remaining blacklisted -> should update in-place, not duplicate/reset timestamp.
+            r2 = c.post(
+                "/blacklist/visitor_1",
+                data=json.dumps({"blacklisted": True, "reason": "updated"}),
+                content_type="application/json",
+            )
+            self.assertEqual(r2.status_code, 200)
+            self.assertEqual(len(admin_app._MOCK_BLACKLIST_STATE), 1)
+            state2 = dict(admin_app._MOCK_BLACKLIST_STATE.get("visitor_1") or {})
+            self.assertEqual(state2.get("reason"), "updated")
+            self.assertEqual(state2.get("blacklisted_at"), ts1)
+
+    def test_blacklist_unknown_visitor_rejected(self):
+        with self.app.test_client() as c:
+            r = c.post(
+                "/blacklist/visitor_does_not_exist",
+                data=json.dumps({"blacklisted": True, "reason": "x"}),
+                content_type="application/json",
+            )
+            self.assertEqual(r.status_code, 404)
+            body = r.get_json() or {}
+            self.assertFalse(body.get("success", True))
+
+    def test_mock_data_toggle_api(self):
+        with self.app.test_client() as c:
+            r = c.get("/api/mock_data")
+            self.assertEqual(r.status_code, 200)
+            body = r.get_json()
+            self.assertIn("mock", body)
+
+            r = c.post("/api/mock_data", data=json.dumps({"mock": True}), content_type="application/json")
+            self.assertEqual(r.status_code, 200)
+            body = r.get_json()
+            self.assertTrue(body["success"])
+            self.assertTrue(body["mock"])
 
 
 if __name__ == "__main__":

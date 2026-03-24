@@ -2,10 +2,13 @@ import os
 import sys
 import cv2
 import base64
+import hashlib
 import numpy as np
 import secrets
 import json
+import threading
 from io import BytesIO
+from collections import defaultdict, deque
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
 import firebase_admin
 from firebase_admin import credentials, db
@@ -92,6 +95,110 @@ except Exception as e:
 db_ref = db.reference() if db_app else None
 
 # --- Visitor / visit policy helpers (registration + returning flow) ---
+
+def _int_env(name, default):
+    try:
+        return int(str(os.environ.get(name, str(default))).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# Registration anti-bot safeguards (rolling windows). Set to 0 to disable a limit.
+REG_LIMIT_IP_PER_MIN = _int_env("REG_LIMIT_IP_PER_MIN", 5)
+REG_LIMIT_IP_PER_HOUR = _int_env("REG_LIMIT_IP_PER_HOUR", 25)
+REG_LIMIT_EMAIL_PER_DAY = _int_env("REG_LIMIT_EMAIL_PER_DAY", 3)
+REG_LIMIT_FACE_PER_DAY = _int_env("REG_LIMIT_FACE_PER_DAY", 3)
+
+_RL_WINDOW_MIN = 60
+_RL_WINDOW_HOUR = 3600
+_RL_WINDOW_DAY = 86400
+_REG_RL_LOCK = threading.Lock()
+_REG_RL_EVENTS = defaultdict(deque)  # key -> deque[timestamp]
+
+
+def _rl_now():
+    return time()
+
+
+def _rl_prune(events, now_ts, window_s):
+    while events and (now_ts - events[0]) >= window_s:
+        events.popleft()
+
+
+def _rl_hit_limit(key, limit, window_s, now_ts=None):
+    """
+    Rolling-window limiter.
+    Returns (allowed: bool, retry_after_seconds: int).
+    """
+    if limit <= 0:
+        return True, 0
+    if now_ts is None:
+        now_ts = _rl_now()
+    with _REG_RL_LOCK:
+        events = _REG_RL_EVENTS[key]
+        _rl_prune(events, now_ts, window_s)
+        if len(events) >= limit:
+            retry_after = max(1, int(window_s - (now_ts - events[0])) + 1)
+            return False, retry_after
+        events.append(now_ts)
+        return True, 0
+
+
+def _norm_email(email):
+    return str(email or "").strip().lower()
+
+
+def _client_ip(req):
+    # Respect proxy headers when present; fall back to remote_addr.
+    forwarded = (req.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return forwarded or (req.remote_addr or "unknown")
+
+
+def _face_fingerprint(embedding):
+    # Quantize embedding to make tiny floating noise stable, then hash.
+    vec = np.asarray(embedding, dtype=np.float64).flatten()
+    if vec.size == 0:
+        return ""
+    q = np.round(vec, 3)
+    return hashlib.sha256(q.tobytes()).hexdigest()
+
+
+def _registration_pre_rate_limit(ip_addr, email_norm):
+    checks = [
+        (f"reg:ip:min:{ip_addr}", REG_LIMIT_IP_PER_MIN, _RL_WINDOW_MIN, "Too many registration attempts from this network. Please wait a minute and try again."),
+        (f"reg:ip:hour:{ip_addr}", REG_LIMIT_IP_PER_HOUR, _RL_WINDOW_HOUR, "Too many registrations from this network in the last hour. Please try again later."),
+    ]
+    if email_norm:
+        checks.append(
+            (f"reg:email:day:{email_norm}", REG_LIMIT_EMAIL_PER_DAY, _RL_WINDOW_DAY, "Too many registrations for this email today. Please try again tomorrow or contact reception.")
+        )
+    retry_after = 0
+    for key, limit, window_s, msg in checks:
+        ok, ra = _rl_hit_limit(key, limit, window_s)
+        if not ok:
+            retry_after = max(retry_after, ra)
+            return False, msg, retry_after
+    return True, None, 0
+
+
+def _registration_face_rate_limit(embedding):
+    face_key = _face_fingerprint(embedding)
+    if not face_key:
+        return True, None, 0
+    ok, retry_after = _rl_hit_limit(f"reg:face:day:{face_key}", REG_LIMIT_FACE_PER_DAY, _RL_WINDOW_DAY)
+    if not ok:
+        return (
+            False,
+            "Too many registration attempts with this face today. Please contact reception.",
+            retry_after,
+        )
+    return True, None, 0
+
+
+def _reset_registration_rate_limit_state_for_tests():
+    with _REG_RL_LOCK:
+        _REG_RL_EVENTS.clear()
+
 
 def _is_blacklisted_flag(raw):
     if raw is True:
@@ -459,9 +566,25 @@ def get_face_embedding(cv2_img):
 def l2_distance(vec1, vec2):
     return np.linalg.norm(np.array(vec1) - np.array(vec2))
 
+_SENTINEL_IDS = frozenset({"null", "none", "undefined", "nan", "true", "false", ""})
+
+def _is_valid_visitor_id(vid):
+    """Reject IDs that are JS/Python sentinel values or empty."""
+    s = str(vid or "").strip()
+    return bool(s) and s.lower() not in _SENTINEL_IDS
+
+def _is_plausible_email(email):
+    e = (email or "").strip().lower()
+    if not e or e in ("n/a", "none", "unknown", "not provided", "no email"):
+        return False
+    return "@" in e
+
+
 # --- Email Functions ---
 def send_email(recipient_email, recipient_name, profile_link):
     """Send email to visitor with their profile link"""
+    if not _is_plausible_email(recipient_email):
+        return False, "Invalid or missing recipient email"
     logger.info(f"Attempting to send profile link email to: {recipient_email}")
     
     if not all([SMTP_SERVER, SMTP_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD]):
@@ -592,6 +715,9 @@ def send_employee_notification(employee_email, employee_name, visitor_data, prof
 
 def send_custom_email(recipient_email, subject, body):
     """Send custom email for notifications"""
+    if not _is_plausible_email(recipient_email):
+        logger.warning(f"Skipping custom email — invalid recipient: {recipient_email}")
+        return False
     logger.info(f"Attempting to send custom email to: {recipient_email}")
     
     if not all([SMTP_SERVER, SMTP_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD]):
@@ -979,6 +1105,15 @@ def finalize_registration():
         if not all([name, email, photo_base64_full]):
             return jsonify({"success": False, "message": "Missing required fields"}), 400
 
+        ip_addr = _client_ip(request)
+        email_norm = _norm_email(email)
+        pre_ok, pre_msg, pre_retry = _registration_pre_rate_limit(ip_addr, email_norm)
+        if not pre_ok:
+            resp = jsonify({"success": False, "message": pre_msg})
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(pre_retry)
+            return resp
+
         if not photo_base64_full or "," not in photo_base64_full:
             return jsonify({"success": False, "message": "Invalid photo data"}), 400
 
@@ -1065,6 +1200,13 @@ def finalize_registration():
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
             return jsonify({"success": False, "message": "Face analysis failed"}), 500
+
+        face_ok, face_msg, face_retry = _registration_face_rate_limit(embedding_array)
+        if not face_ok:
+            resp = jsonify({"success": False, "message": face_msg})
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(face_retry)
+            return resp
 
         # CREATE OR REUSE VISITOR (email-based)
         visitor_id = None
@@ -1428,6 +1570,9 @@ def resend_qr_email():
         if not visitor_data:
             return jsonify({"success": False, "message": "Visitor not found."}), 404
         basic_info = visitor_data.get("basic_info", {})
+        stored_email = (basic_info.get("contact") or basic_info.get("email") or "").strip().lower()
+        if stored_email and email.lower() != stored_email:
+            return jsonify({"success": False, "message": "Email does not match the registered visitor."}), 403
         profile_link = basic_info.get("profile_link") or (request.url_root.rstrip("/") + url_for("profile_page", visitor_id=visitor_id))
         visitor_name = basic_info.get("name", "Visitor")
         email_success, email_message = send_email(email, visitor_name, profile_link)
@@ -1582,6 +1727,10 @@ def employee_action(visitor_id):
 @app.route('/employee_action_approve/<visitor_id>', methods=['POST'])
 def employee_action_approve(visitor_id):
     try:
+        visitor_id = str(visitor_id or '').strip()
+        if not _is_valid_visitor_id(visitor_id):
+            return jsonify({'status': 'error', 'message': 'Invalid visitor ID'}), 400
+
         data = request.get_json()
         if not data:
             return jsonify({
@@ -1589,7 +1738,7 @@ def employee_action_approve(visitor_id):
                 'message': 'No JSON data received'
             }), 400
             
-        visit_id = data.get('visit_id')
+        visit_id = str(data.get('visit_id') or '').strip()
         
         if not visit_id:
             return jsonify({
@@ -1597,13 +1746,16 @@ def employee_action_approve(visitor_id):
                 'message': 'Visit ID is required'
             }), 400
         
-        # Update the visit status in Firebase
-        visit_ref = db.reference(f'visitors/{visitor_id}/visits/{visit_id}')
+        visitor_ref = db.reference(f'visitors/{visitor_id}')
+        visitor_snapshot = visitor_ref.get()
+        if not visitor_snapshot:
+            return jsonify({'status': 'error', 'message': 'Visitor not found'}), 404
+
+        visit_ref = visitor_ref.child(f'visits/{visit_id}')
+        visit_data = visit_ref.get()
+        if not visit_data:
+            return jsonify({'status': 'error', 'message': 'Visit not found'}), 404
         
-        # Get current visit data
-        visit_data = visit_ref.get() or {}
-        
-        # Update the visit status and timestamp
         updates = {
             'status': 'approved',
             'visit_approved': True,
@@ -1611,12 +1763,8 @@ def employee_action_approve(visitor_id):
             'last_updated': datetime.utcnow().isoformat()
         }
         
-        # Merge updates with existing data
-        visit_data.update(updates)
         visit_ref.update(updates)
         
-        # Also update the main visitor's last_visit status
-        visitor_ref = db.reference(f'visitors/{visitor_id}')
         visitor_ref.update({
             'last_visit_status': 'approved',
             'last_updated': datetime.utcnow().isoformat()
@@ -1636,6 +1784,10 @@ def employee_action_approve(visitor_id):
 @app.route('/employee_action_reject/<visitor_id>', methods=['POST'])
 def employee_action_reject(visitor_id):
     try:
+        visitor_id = str(visitor_id or '').strip()
+        if not _is_valid_visitor_id(visitor_id):
+            return jsonify({'status': 'error', 'message': 'Invalid visitor ID'}), 400
+
         data = request.get_json()
         if not data:
             return jsonify({
@@ -1643,7 +1795,7 @@ def employee_action_reject(visitor_id):
                 'message': 'No JSON data received'
             }), 400
             
-        visit_id = data.get('visit_id')
+        visit_id = str(data.get('visit_id') or '').strip()
         rejection_reason = data.get('rejection_reason')
         
         if not visit_id:
@@ -1652,13 +1804,16 @@ def employee_action_reject(visitor_id):
                 'message': 'Visit ID is required'
             }), 400
         
-        # Update the visit status in Firebase
-        visit_ref = db.reference(f'visitors/{visitor_id}/visits/{visit_id}')
+        visitor_ref = db.reference(f'visitors/{visitor_id}')
+        visitor_snapshot = visitor_ref.get()
+        if not visitor_snapshot:
+            return jsonify({'status': 'error', 'message': 'Visitor not found'}), 404
 
-        # Get current visit data
-        visit_data = visit_ref.get() or {}
+        visit_ref = visitor_ref.child(f'visits/{visit_id}')
+        visit_data = visit_ref.get()
+        if not visit_data:
+            return jsonify({'status': 'error', 'message': 'Visit not found'}), 404
 
-        # Update the visit status and rejection reason
         updates = {
             'status': 'rejected',
             'rejection_reason': rejection_reason,
@@ -1667,20 +1822,15 @@ def employee_action_reject(visitor_id):
             'last_updated': datetime.utcnow().isoformat()
         }
 
-        # Merge updates with existing data
-        visit_data.update(updates)
         visit_ref.update(updates)
 
-        # Also update the main visitor's last_visit status
-        visitor_ref = db.reference(f'visitors/{visitor_id}')
         visitor_ref.update({
             'last_visit_status': 'rejected',
             'last_updated': datetime.utcnow().isoformat()
         })
 
-        # Send rejection notification email to the visitor
         try:
-            visitor_snapshot = visitor_ref.get() or {}
+            visitor_snapshot = visitor_snapshot or {}
             basic_info = visitor_snapshot.get("basic_info", {}) or {}
             visitor_email = basic_info.get("contact") or basic_info.get("email")
             visitor_name = basic_info.get("name", "Visitor")
@@ -1718,6 +1868,10 @@ def employee_action_reject(visitor_id):
 @app.route('/employee_action_reschedule/<visitor_id>', methods=['POST'])
 def employee_action_reschedule(visitor_id):
     try:
+        visitor_id = str(visitor_id or '').strip()
+        if not _is_valid_visitor_id(visitor_id):
+            return jsonify({'status': 'error', 'message': 'Invalid visitor ID'}), 400
+
         data = request.get_json()
         if not data:
             return jsonify({
@@ -1725,8 +1879,8 @@ def employee_action_reschedule(visitor_id):
                 'message': 'No JSON data received'
             }), 400
             
-        visit_id = data.get('visit_id')
-        new_visit_date = data.get('new_visit_date')
+        visit_id = str(data.get('visit_id') or '').strip()
+        new_visit_date = (data.get('new_visit_date') or '').strip()
         reschedule_reason = data.get('reschedule_reason')
         
         if not visit_id or not new_visit_date:
@@ -1735,13 +1889,16 @@ def employee_action_reschedule(visitor_id):
                 'message': 'Visit ID and new visit date are required'
             }), 400
         
-        # Update the visit in Firebase
-        visit_ref = db.reference(f'visitors/{visitor_id}/visits/{visit_id}')
+        visitor_ref = db.reference(f'visitors/{visitor_id}')
+        visitor_snapshot = visitor_ref.get()
+        if not visitor_snapshot:
+            return jsonify({'status': 'error', 'message': 'Visitor not found'}), 404
+
+        visit_ref = visitor_ref.child(f'visits/{visit_id}')
+        visit_data = visit_ref.get()
+        if not visit_data:
+            return jsonify({'status': 'error', 'message': 'Visit not found'}), 404
         
-        # Get current visit data
-        visit_data = visit_ref.get() or {}
-        
-        # Update the visit date and status
         updates = {
             'status': 'rescheduled',
             'visit_date': new_visit_date,
@@ -1750,12 +1907,8 @@ def employee_action_reschedule(visitor_id):
             'last_updated': datetime.utcnow().isoformat()
         }
         
-        # Merge updates with existing data
-        visit_data.update(updates)
         visit_ref.update(updates)
         
-        # Also update the main visitor's visit_date
-        visitor_ref = db.reference(f'visitors/{visitor_id}')
         visitor_ref.update({
             'last_visit': datetime.utcnow().isoformat(),
             'last_updated': datetime.utcnow().isoformat()
@@ -1859,10 +2012,11 @@ def debug_session():
 @app.route("/verify-face", methods=['POST'])
 def verify_face():
     data = request.get_json()
+    if not data or not isinstance(data, dict) or "image" not in data:
+        return jsonify({"match": False, "message": "Missing or invalid request body (image required)"}), 400
     logger.info("Face verification request received")
     
     try:
-        # Extract and decode image
         captured_base64 = data["image"].split(",")[1]
         np_img = np.frombuffer(base64.b64decode(captured_base64), np.uint8)
         cv2_img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)

@@ -62,7 +62,7 @@ class GateEdgeCaseTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.get_json() or {}
 
-    def test_right_face_wrong_qr_owner_invalidates_qr(self):
+    def test_wrong_face_for_qr_denied_but_qr_still_valid(self):
         v1 = "visitor_demo_1"
         v2 = "visitor_demo_2"
         visit_id = "visit_demo_1"
@@ -70,10 +70,10 @@ class GateEdgeCaseTests(unittest.TestCase):
 
         res = self._post_mock_auth(mock_face_id=v2, qr_data=qr_payload)
         self.assertEqual(res.get("status"), "denied")
-        self.assertIn("Security alert", res.get("message", ""))
+        self.assertIn("do not match", res.get("message", "").lower())
 
         qr_state = self._get_visit(v1, visit_id).get("qr_state", {})
-        self.assertEqual(qr_state.get("status"), self.gate.QR_INVALIDATED)
+        self.assertEqual(qr_state.get("status"), self.gate.QR_UNUSED)
 
     def test_stolen_qr_invalidated_on_face_only_checkout(self):
         v1 = "visitor_demo_1"
@@ -179,7 +179,7 @@ class GateEdgeCaseTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         data = resp.get_json() or {}
         self.assertEqual(data.get("status"), "denied")
-        self.assertIn("Security alert", data.get("message", ""))
+        self.assertIn("do not match", data.get("message", "").lower())
 
     def test_checkin_twin_ambiguity_qr_disambiguates_when_owner_not_geometric_best(self):
         """
@@ -299,7 +299,7 @@ class GateEdgeCaseTests(unittest.TestCase):
             })
         data = resp.get_json() or {}
         self.assertEqual(data["status"], "denied")
-        self.assertIn("Security alert", data["message"])
+        self.assertIn("do not match", data["message"].lower())
 
     # ── Unregistered face + correct QR ─────────────────────────────────
     def test_unregistered_face_correct_qr_denied(self):
@@ -321,7 +321,7 @@ class GateEdgeCaseTests(unittest.TestCase):
         self.assertEqual(data["status"], "denied")
         msg = (data.get("message") or "").lower()
         self.assertTrue(
-            "no match found" in msg or "face not recognized" in msg,
+            "no match found" in msg or "face not recognized" in msg or "incorrect face" in msg,
             msg=f"Unexpected denial message: {data.get('message')!r}",
         )
 
@@ -462,8 +462,8 @@ class GateEdgeCaseTests(unittest.TestCase):
         qr_state = self._get_visit(v1, visit_id).get("qr_state", {})
         self.assertEqual(qr_state["status"], self.gate.QR_UNUSED)
 
-    def test_qr_invalidated_after_wrong_face_during_checkout(self):
-        """At checkout phase, wrong face should deny and invalidate QR."""
+    def test_qr_not_invalidated_after_wrong_face_during_checkout(self):
+        """Wrong face at checkout denies access but keeps QR valid for retry with correct face."""
         v1 = "visitor_demo_1"
         visit_id = "visit_demo_1"
         qr_payload = self._get_visit(v1, visit_id)["qr_payload"]
@@ -479,15 +479,16 @@ class GateEdgeCaseTests(unittest.TestCase):
 
         with unittest.mock.patch.object(self.gate, "find_all_face_matches", return_value=fake_matches), \
              unittest.mock.patch.object(self.gate, "get_face_embedding", return_value=fake_emb):
-            self.client.post("/checkin_verify_and_log", json={
+            resp = self.client.post("/checkin_verify_and_log", json={
                 "image": self._minimal_jpeg_data_url(),
                 "qr_data": qr_payload,
                 "action": "checkout",
             })
 
+        self.assertEqual((resp.get_json() or {}).get("status"), "denied")
         qr_state = self._get_visit(v1, visit_id).get("qr_state", {})
-        self.assertEqual(qr_state["status"], self.gate.QR_INVALIDATED)
-        self.assertIn("wrong person", qr_state.get("invalidated_reason", "").lower())
+        self.assertNotEqual(qr_state.get("status"), self.gate.QR_INVALIDATED)
+        self.assertEqual(qr_state.get("status"), self.gate.QR_UNUSED)
 
     # ── Original tests ─────────────────────────────────────────────────
     def test_blacklisted_visitor_denied_and_qr_invalidated(self):

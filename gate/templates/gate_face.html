@@ -135,7 +135,7 @@
 
         if (!qrData) {
             messageBox.className = 'message-error mb-4 mx-auto';
-            messageBox.innerHTML = 'No QR data. Please <a href="/checkin_gate" class="underline">scan your QR first</a>.';
+            messageBox.innerHTML = 'No QR data. <a href="/checkin_gate" class="underline">Please scan your QR first</a>.';
         } else {
             stepLabel.textContent = action === 'checkin' ? 'Check In — Step 2: Face Verification' : 'Check Out — Step 2: Face Verification';
         }

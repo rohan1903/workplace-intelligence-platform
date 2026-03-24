@@ -95,27 +95,33 @@ if _raw_mock is not None and str(_raw_mock).strip() != "":
 else:
     USE_MOCK_DATA = _parse_env_bool(os.getenv("USE_MOCK_DATA"), default=True)
 
-if FIREBASE_AVAILABLE and not USE_MOCK_DATA:
+FIREBASE_INITIALIZED = False
+
+if FIREBASE_AVAILABLE:
     try:
         if os.path.exists(_admin_firebase_cred_path):
-            cred = credentials.Certificate(_admin_firebase_cred_path)
-            database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
-            firebase_admin.initialize_app(cred, {"databaseURL": database_url})
-            print("[OK] Firebase initialized successfully - Using REAL data")
+            # Always initialize Firebase so it's ready when mock mode is toggled off at runtime.
+            if not firebase_admin._apps:
+                cred = credentials.Certificate(_admin_firebase_cred_path)
+                database_url = os.environ.get("FIREBASE_DATABASE_URL", "https://visitor-management-8f5b4-default-rtdb.firebaseio.com").rstrip("/") + "/"
+                firebase_admin.initialize_app(cred, {"databaseURL": database_url})
+            FIREBASE_INITIALIZED = True
+            if USE_MOCK_DATA:
+                print("[OK] Firebase initialized (standby) — currently using MOCK DATA.")
+                print("[*] For live Firebase: set USE_MOCK_DATA=false in admin/.env or use the dashboard toggle.")
+            else:
+                print("[OK] Firebase initialized successfully - Using REAL data")
         else:
             USE_MOCK_DATA = True
             print("[!] Firebase credentials not found. Using mock data for demonstration.")
             print(f"[*] Expected file: {_admin_firebase_cred_path}")
-            print("[*] To use real Firebase: Add firebase_credentials.json next to admin app.py and set USE_MOCK_DATA=False")
     except Exception as e:
-        USE_MOCK_DATA = True
+        if not USE_MOCK_DATA:
+            USE_MOCK_DATA = True
         print(f"[!] Firebase initialization failed: {e}. Using mock data for demonstration.")
-elif USE_MOCK_DATA:
-    print("[*] Using MOCK DATA — /visitors and /dashboard use generated demo records (not Firebase).")
-    print("[*] For live Firebase: set USE_MOCK_DATA=false in admin/.env (and ensure credentials exist).")
 else:
     USE_MOCK_DATA = True
-    print("[!] Firebase not available. Using mock data for demonstration.")
+    print("[!] firebase-admin not installed. Using mock data mode.")
 
 # --------------------------
 # Email Config
@@ -125,8 +131,24 @@ SENDER_PASS = os.getenv("EMAIL_PASS")
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 
+_SENTINEL_IDS = frozenset({"null", "undefined", ""})
+
+def _is_valid_visitor_id(vid):
+    """Reject empty IDs and common JS sentinel values."""
+    s = str(vid or "").strip()
+    return bool(s) and s.lower() not in _SENTINEL_IDS
+
+def _is_plausible_email(email):
+    e = (email or "").strip().lower()
+    if not e or e in ("n/a", "none", "unknown", "not provided", "no email"):
+        return False
+    return "@" in e
+
 def send_email(recipient_email, registration_link):
     """Send email with registration link."""
+    if not _is_plausible_email(recipient_email):
+        print("[!] Invalid or missing recipient email.")
+        return False
     if not (SENDER_EMAIL and SENDER_PASS):
         print("[!] Missing SMTP credentials.")
         return False
@@ -149,6 +171,8 @@ def send_email(recipient_email, registration_link):
 
 def send_notification_email(recipient_email, subject, body):
     """Send a single notification email (e.g. time exceeded alert)."""
+    if not _is_plausible_email(recipient_email):
+        return False
     if not (SENDER_EMAIL and SENDER_PASS):
         return False
     msg = MIMEText(body)
@@ -252,7 +276,7 @@ def _qr_image_bytes_from_payload(payload_string):
 
 def send_qr_checkin_email(recipient_email, visitor_name, checkin_link, qr_payload=None, visit_details=None):
     """Send visitor an email with full check-in content (QR + visit details). Sensitive data is only in email, not on the check-in page.
-    visit_details: dict with purpose, duration, visit_date, status, employee_name (optional).
+    visit_details: dict with purpose, duration, visit_date, status (optional).
     Returns (True, None) on success, (False, reason_string) on failure."""
     if not recipient_email or str(recipient_email).strip() in ("", "N/A"):
         return False, "No visitor email address"
@@ -297,14 +321,12 @@ def send_qr_checkin_email(recipient_email, visitor_name, checkin_link, qr_payloa
         except Exception:
             visit_date = raw_visit_date
     status = vd.get("status", "Approved")
-    employee_name = vd.get("employee_name", "N/A")
     visit_block = f"""
     <table style="width: 100%; border-collapse: collapse; margin: 16px 0; background: #f8fafc; border-radius: 8px; overflow: hidden;">
         <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Purpose</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{purpose}</td></tr>
         <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Duration</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{duration}</td></tr>
         <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Visit date</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{visit_date}</td></tr>
-        <tr><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Status</td><td style="padding: 10px 14px; border-bottom: 1px solid #e2e8f0;">{status}</td></tr>
-        <tr><td style="padding: 10px 14px; font-weight: 600; color: #475569;">Employee</td><td style="padding: 10px 14px;">{employee_name}</td></tr>
+        <tr><td style="padding: 10px 14px; font-weight: 600; color: #475569;">Status</td><td style="padding: 10px 14px;">{status}</td></tr>
     </table>
     """
 
@@ -337,7 +359,6 @@ Visit details:
 - Duration: {vd.get('duration', 'Not specified')}
 - Visit date: {vd.get('visit_date', '—')}
 - Status: {vd.get('status', 'Approved')}
-- Employee: {vd.get('employee_name', 'N/A')}
 
 Security: Do not share this email or your QR code. Use the QR from the HTML version at the gate.
 
@@ -721,7 +742,8 @@ def get_mock_employees():
     }
 
     mock_employees = {}
-    num_employees = rng.randint(38, 52)
+    # Fixed count: static demo dataset so mock dashboards are stable.
+    num_employees = 112
 
     for i in range(num_employees):
         emp_id = f"emp_{i+1}"
@@ -884,6 +906,43 @@ def _extract_visitor_room(visitor_data, rooms_map):
     return room_id, label
 
 
+def _registered_at_from_visitor(visitor_data):
+    """When the visitor first appeared in the system.
+
+    Registration sets ``basic_info.registered_at``; the gate may add ``transactions``.
+    Detail pages used only ``transactions``, so profiles showed N/A until check-in.
+    """
+    if not isinstance(visitor_data, dict):
+        return 'N/A'
+    basic_info = visitor_data.get('basic_info') or {}
+    ra = basic_info.get('registered_at')
+    if ra is not None and str(ra).strip() and str(ra).strip().upper() != 'N/A':
+        return str(ra).strip()
+    transactions = visitor_data.get('transactions') or {}
+    if isinstance(transactions, dict) and transactions:
+        earliest_key = min(transactions.keys())
+        ts = (transactions[earliest_key] or {}).get('timestamp')
+        if ts:
+            return ts
+    visits = visitor_data.get('visits') or {}
+    if not isinstance(visits, dict) or not visits:
+        return 'N/A'
+    earliest_dt = None
+    for v in visits.values():
+        if not isinstance(v, dict):
+            continue
+        ca = v.get('created_at')
+        if not ca:
+            continue
+        try:
+            dt = datetime.strptime(ca, "%Y-%m-%d %H:%M:%S")
+            if earliest_dt is None or dt < earliest_dt:
+                earliest_dt = dt
+        except ValueError:
+            continue
+    return earliest_dt.strftime("%Y-%m-%d %H:%M:%S") if earliest_dt else 'N/A'
+
+
 def _registration_count_by_room(all_visitors):
     """Per room_id: number of visitors whose latest visit selected that room at registration."""
     counts = {}
@@ -1005,6 +1064,31 @@ def index():
                 backdrop-filter: blur(10px);
                 border: 1px solid rgba(255, 255, 255, 0.2);
             }
+            .toggle-track {
+                width: 52px; height: 28px;
+                border-radius: 14px;
+                background: rgba(255,255,255,0.25);
+                cursor: pointer;
+                transition: background 0.3s;
+                position: relative;
+            }
+            .toggle-track.active { background: #10B981; }
+            .toggle-knob {
+                width: 22px; height: 22px;
+                border-radius: 50%;
+                background: white;
+                position: absolute; top: 3px; left: 3px;
+                transition: transform 0.3s;
+                box-shadow: 0 1px 3px rgba(0,0,0,.3);
+            }
+            .toggle-track.active .toggle-knob { transform: translateX(24px); }
+            .mock-badge {
+                display: inline-flex; align-items: center; gap: 6px;
+                font-size: 0.75rem; font-weight: 600;
+                padding: 2px 10px; border-radius: 9999px;
+            }
+            .mock-badge.on  { background: #10B981; color: white; }
+            .mock-badge.off { background: rgba(255,255,255,0.2); color: rgba(255,255,255,0.7); }
             .main-grid {
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
@@ -1044,6 +1128,16 @@ def index():
                 </div>
                 <h1 class="text-4xl md:text-5xl font-bold text-white mb-3">Admin Dashboard</h1>
                 <p class="text-white/80 text-lg">Workplace Intelligence Platform</p>
+                <!-- Mock Data Toggle -->
+                <div class="mt-4 inline-flex items-center gap-3 glass-effect rounded-full px-4 py-2">
+                    <span class="text-white/80 text-sm font-medium">Demo Mode</span>
+                    <div id="mockToggle" class="toggle-track {{ 'active' if use_mock else '' }}" onclick="toggleMockData()">
+                        <div class="toggle-knob"></div>
+                    </div>
+                    <span id="mockBadge" class="mock-badge {{ 'on' if use_mock else 'off' }}">
+                        {{ 'MOCK' if use_mock else 'LIVE' }}
+                    </span>
+                </div>
             </div>
 
             <!-- Main Navigation Cards -->
@@ -1189,36 +1283,59 @@ def index():
         </div>
 
         <script>
-            // Add some interactive animations
             document.addEventListener('DOMContentLoaded', function() {
                 const cards = document.querySelectorAll('.card-hover');
                 cards.forEach((card, index) => {
                     card.style.opacity = '0';
                     card.style.transform = 'translateY(20px)';
-                    
                     setTimeout(() => {
                         card.style.transition = 'all 0.5s ease';
                         card.style.opacity = '1';
                         card.style.transform = 'translateY(0)';
                     }, index * 100);
                 });
-
-                // Update stats with random numbers (for demo)
-                setInterval(() => {
-                    const stats = document.querySelectorAll('.glass-effect .text-2xl');
-                    stats.forEach(stat => {
-                        const current = parseInt(stat.textContent);
-                        const change = Math.floor(Math.random() * 3) - 1;
-                        const newValue = Math.max(0, current + change);
-                        stat.textContent = newValue;
-                    });
-                }, 3000);
             });
+
+            function toggleMockData() {
+                const track = document.getElementById('mockToggle');
+                const badge = document.getElementById('mockBadge');
+                const enabling = !track.classList.contains('active');
+
+                track.style.opacity = '0.5';
+                track.style.pointerEvents = 'none';
+
+                fetch('/api/mock_data', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mock: enabling})
+                })
+                .then(r => r.json().then(d => ({ok: r.ok, data: d})))
+                .then(({ok, data}) => {
+                    if (!ok) {
+                        alert(data.message || 'Failed to toggle mock data');
+                        return;
+                    }
+                    if (data.mock) {
+                        track.classList.add('active');
+                        badge.className = 'mock-badge on';
+                        badge.textContent = 'MOCK';
+                    } else {
+                        track.classList.remove('active');
+                        badge.className = 'mock-badge off';
+                        badge.textContent = 'LIVE';
+                    }
+                })
+                .catch(err => alert('Error toggling mock data: ' + err))
+                .finally(() => {
+                    track.style.opacity = '1';
+                    track.style.pointerEvents = 'auto';
+                });
+            }
         </script>
     </body>
     </html>
     """
-    return render_template_string(INDEX_HTML)
+    return render_template_string(INDEX_HTML, use_mock=USE_MOCK_DATA)
 @app.route('/upload_invitations')
 def upload_invitations_page():
     """Dedicated page for uploading invitations with clean UI"""
@@ -1433,6 +1550,32 @@ def admin_dashboard():
                 background: linear-gradient(135deg, #EF4444, #DC2626);
                 color: white;
             }
+            .toggle-track {
+                width: 44px; height: 24px;
+                border-radius: 12px;
+                background: #D1D5DB;
+                cursor: pointer;
+                transition: background 0.3s;
+                position: relative;
+                flex-shrink: 0;
+            }
+            .toggle-track.active { background: #10B981; }
+            .toggle-knob {
+                width: 18px; height: 18px;
+                border-radius: 50%;
+                background: white;
+                position: absolute; top: 3px; left: 3px;
+                transition: transform 0.3s;
+                box-shadow: 0 1px 3px rgba(0,0,0,.3);
+            }
+            .toggle-track.active .toggle-knob { transform: translateX(20px); }
+            .mock-badge {
+                display: inline-flex; align-items: center;
+                font-size: 0.7rem; font-weight: 600;
+                padding: 1px 8px; border-radius: 9999px;
+            }
+            .mock-badge.on  { background: #10B981; color: white; }
+            .mock-badge.off { background: #E5E7EB; color: #6B7280; }
         </style>
     </head>
     <body class="bg-gray-50 min-h-screen">
@@ -1448,6 +1591,16 @@ def admin_dashboard():
                         <p class="text-sm text-gray-600">Comprehensive visitor insights with time range filters</p>
                     </div>
                     <div class="flex items-center gap-4">
+                        <!-- Mock Data Toggle -->
+                        <div class="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-1.5 border border-gray-200">
+                            <span class="text-xs text-gray-500 font-medium">Demo</span>
+                            <div id="mockToggle" class="toggle-track {{ 'active' if use_mock else '' }}" onclick="toggleMockData()">
+                                <div class="toggle-knob"></div>
+                            </div>
+                            <span id="mockBadge" class="mock-badge {{ 'on' if use_mock else 'off' }}">
+                                {{ 'MOCK' if use_mock else 'LIVE' }}
+                            </span>
+                        </div>
                         <a href="{{ url_for('blacklist_page') }}" class="text-red-600 hover:text-red-800 font-medium flex items-center">
                             <i class="fas fa-ban mr-2"></i>Blacklisted
                         </a>
@@ -2269,13 +2422,45 @@ def admin_dashboard():
                 var csv = [headers.join(','), rows.map(function(r) { return r.join(','); }).join('\\n')].join('\\n');
                 var a = document.createElement('a'); a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv); a.download = 'occupancy_' + which + '_' + new Date().toISOString().slice(0, 10) + '.csv'; a.click();
             }
+
+            function toggleMockData() {
+                var track = document.getElementById('mockToggle');
+                var badge = document.getElementById('mockBadge');
+                var enabling = !track.classList.contains('active');
+                track.style.opacity = '0.5';
+                track.style.pointerEvents = 'none';
+                fetch('/api/mock_data', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mock: enabling})
+                })
+                .then(function(r) { return r.json().then(function(d) { return {ok: r.ok, data: d}; }); })
+                .then(function(res) {
+                    if (!res.ok) { alert(res.data.message || 'Failed'); return; }
+                    if (res.data.mock) {
+                        track.classList.add('active');
+                        badge.className = 'mock-badge on';
+                        badge.textContent = 'MOCK';
+                    } else {
+                        track.classList.remove('active');
+                        badge.className = 'mock-badge off';
+                        badge.textContent = 'LIVE';
+                    }
+                    window.location.reload();
+                })
+                .catch(function(e) { alert('Error: ' + e); })
+                .finally(function() {
+                    track.style.opacity = '1';
+                    track.style.pointerEvents = 'auto';
+                });
+            }
         </script>
     </body>
     </html>
     """
     resp = make_response(render_template_string(DASHBOARD_HTML, analytics=analytics, time_filter=time_filter,
                                 start_date=start_date, end_date=end_date, start_time=start_time,
-                                end_time=end_time, chart_type=chart_type))
+                                end_time=end_time, chart_type=chart_type, use_mock=USE_MOCK_DATA))
     resp.headers['Cache-Control'] = 'no-store'
     return resp
 
@@ -2438,12 +2623,7 @@ def get_visitor_analytics(time_filter='today', start_date=None, end_date=None, s
         if in_period:
             period_visitors += 1
         
-        # Blacklisted count
-        blacklisted = visitor_data.get('blacklisted', False)
-        if isinstance(blacklisted, str):
-            if blacklisted.strip().lower() in ['yes', 'true', '1']:
-                blacklisted_count += 1
-        elif blacklisted:
+        if _is_visitor_blacklisted(visitor_data):
             blacklisted_count += 1
         
         # Purpose categorization
@@ -3791,13 +3971,14 @@ def _build_visitor_list_from_raw(all_visitors):
     if not all_visitors:
         return visitors_data
     for vid, data in all_visitors.items():
+        if not isinstance(data, dict) or not _is_valid_visitor_id(vid):
+            continue
         basic_info = data.get('basic_info') or {}
         visitor_name = basic_info.get('name', 'N/A')
         visitor_contact = basic_info.get('contact', 'N/A')
         visitor_email = basic_info.get('email', 'N/A')
         company = basic_info.get('company', 'N/A')
-        raw_bl = basic_info.get('blacklisted', 'no')
-        blacklisted = raw_bl is True or (isinstance(raw_bl, str) and raw_bl.strip().lower() in ['yes', 'true', '1'])
+        blacklisted = _is_visitor_blacklisted(data)
         blacklist_reason = basic_info.get('blacklist_reason', 'No reason provided')
         blacklisted_at = basic_info.get('blacklisted_at', '') or ''
         visits = data.get('visits') or {}
@@ -4122,8 +4303,9 @@ def blacklist_page():
                     var reason = (editInput.value || '').trim();
                     if (!reason) { showToast('Reason cannot be empty.', 'error'); return; }
                     if (!pendingEditVisitorId) return;
+                    var visitorId = pendingEditVisitorId;
                     closeEditReasonModal();
-                    doBlacklistPost(pendingEditVisitorId, true, reason, 'updated');
+                    doBlacklistPost(visitorId, true, reason, 'updated');
                 });
 
                 var removeModal = document.getElementById('remove-confirm-modal');
@@ -4215,14 +4397,30 @@ def toggle_blacklist(visitor_id):
     """Toggle or update blacklist status for a visitor (updates basic_info; stores blacklisted_at when adding)."""
     try:
         data = request.get_json() or {}
-        blacklisted = data.get('blacklisted', False)
+        visitor_id = str(visitor_id or '').strip()
+        if not visitor_id:
+            return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
+        raw_blacklisted = data.get('blacklisted', False)
+        if isinstance(raw_blacklisted, str):
+            blacklisted = raw_blacklisted.strip().lower() in ('true', '1', 'yes', 'on')
+        else:
+            blacklisted = bool(raw_blacklisted)
         reason = (data.get('reason') or '').strip() or 'No reason provided'
 
         if USE_MOCK_DATA:
+            all_visitors = get_mock_visitors()
+            if visitor_id not in all_visitors:
+                return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+            prev = _MOCK_BLACKLIST_STATE.get(visitor_id, {})
+            # Editing reason for an already-blacklisted visitor should not create/refresh timestamp.
+            prev_blacklisted_at = prev.get('blacklisted_at', '')
             _MOCK_BLACKLIST_STATE[visitor_id] = {
                 'blacklisted': blacklisted,
                 'reason': reason if blacklisted else 'No reason provided',
-                'blacklisted_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if blacklisted else ''
+                'blacklisted_at': (
+                    prev_blacklisted_at if (blacklisted and prev_blacklisted_at)
+                    else (datetime.now().strftime('%Y-%m-%d %H:%M:%S') if blacklisted else '')
+                )
             }
             return jsonify({
                 'success': True,
@@ -4231,23 +4429,33 @@ def toggle_blacklist(visitor_id):
 
         visitors_ref = db.reference('visitors')
         visitor_ref = visitors_ref.child(visitor_id)
+        visitor_snapshot = visitor_ref.get() or {}
+        # Backward compatibility: allow edits/removals for legacy malformed IDs
+        # only when such a record already exists in Firebase.
+        if not _is_valid_visitor_id(visitor_id) and not visitor_snapshot:
+            return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
+        if not visitor_snapshot:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
         basic_info_ref = visitor_ref.child('basic_info')
 
         update_payload = {
             'blacklisted': 'yes' if blacklisted else 'no',
             'blacklist_reason': reason if blacklisted else 'No reason provided'
         }
+        existing_basic = visitor_snapshot.get('basic_info') or {}
+        existing_blacklisted = str(existing_basic.get('blacklisted', 'no')).strip().lower() in ('yes', 'true', '1')
+        existing_blacklisted_at = existing_basic.get('blacklisted_at', '')
         if blacklisted:
-            update_payload['blacklisted_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            # Editing reason should keep original added-on time.
+            update_payload['blacklisted_at'] = existing_blacklisted_at if existing_blacklisted and existing_blacklisted_at else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         else:
             update_payload['blacklisted_at'] = ''
 
         basic_info_ref.update(update_payload)
 
         # Send blacklist notification email when adding to blacklist (not when removing)
-        if blacklisted:
+        if blacklisted and not existing_blacklisted:
             try:
-                visitor_snapshot = visitor_ref.get() or {}
                 basic_info = visitor_snapshot.get('basic_info') or {}
                 visitor_email = basic_info.get('contact') or basic_info.get('email')
                 visitor_name = basic_info.get('name', 'Visitor')
@@ -4302,6 +4510,9 @@ def _is_visitor_blacklisted(visitor_data):
 def visitor_approve(visitor_id):
     """Set visitor status to Approved (most recent visit + top-level). Blocked if visitor is blacklisted.
     Sends visitor an email with QR / check-in page link if SMTP is configured."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
     if USE_MOCK_DATA:
         all_visitors = get_mock_visitors()
         data = all_visitors.get(visitor_id)
@@ -4346,7 +4557,6 @@ def visitor_approve(visitor_id):
                 "duration": visit_data.get("duration", "Not specified"),
                 "visit_date": formatted_date,
                 "status": visit_data.get("status", "Approved"),
-                "employee_name": visit_data.get("employee_name", "N/A"),
             }
             if visitor_email and str(visitor_email).strip() and str(visitor_email).strip() != "N/A":
                 reg_url = os.getenv("REGISTRATION_APP_URL", "http://localhost:5001").rstrip("/")
@@ -4380,7 +4590,13 @@ def visitor_approve(visitor_id):
 @app.route('/visitor/<visitor_id>/reject', methods=['POST'])
 def visitor_reject(visitor_id):
     """Set visitor status to Rejected and notify them via email."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
     if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+        if visitor_id not in all_visitors:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
         return jsonify({'success': True})
     try:
         ref = db.reference(f'visitors/{visitor_id}')
@@ -4422,6 +4638,9 @@ def visitor_reject(visitor_id):
 @app.route('/visitor/<visitor_id>/checkin', methods=['POST'])
 def visitor_checkin(visitor_id):
     """Set visitor status to Checked In, set check_in_time and expected_checkout_time. Blocked if visitor is blacklisted."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
     now = datetime.now()
     checkout_at = now + timedelta(hours=2)
     now_str = now.strftime('%Y-%m-%d %H:%M:%S')
@@ -4461,8 +4680,14 @@ def visitor_checkin(visitor_id):
 @app.route('/visitor/<visitor_id>/checkout', methods=['POST'])
 def visitor_checkout(visitor_id):
     """Set visitor status to Checked Out, set check_out_time."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+        if visitor_id not in all_visitors:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
         return jsonify({'success': True})
     try:
         ref = db.reference(f'visitors/{visitor_id}')
@@ -4547,6 +4772,9 @@ from datetime import datetime, timedelta
 @app.route('/visitor/<visitor_id>')
 def visitor_detail(visitor_id):
     """Fetches and displays detailed information for a single visitor."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return abort(400, description="Invalid visitor ID.")
     if USE_MOCK_DATA:
         all_visitors = get_mock_visitors()
         visitor_data = all_visitors.get(visitor_id)
@@ -4658,12 +4886,7 @@ def visitor_detail(visitor_id):
 
     # Get transactions for history
     transactions = visitor_data.get('transactions', {})
-    
-    # Get registered_at from the earliest transaction or use current time
-    registered_at = 'N/A'
-    if transactions:
-        earliest_transaction = min(transactions.keys())
-        registered_at = transactions[earliest_transaction].get('timestamp', 'N/A')
+    registered_at = _registered_at_from_visitor(visitor_data)
 
     # Prepare visit history for display
     visit_history = []
@@ -4745,7 +4968,7 @@ def visitor_detail(visitor_id):
                 box-shadow: 0 8px 25px -5px rgba(0, 0, 0, 0.1);
             }
             .gradient-bg {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);
             }
             /* Toggle Switch Styles */
             .toggle-switch {
@@ -4927,16 +5150,16 @@ def visitor_detail(visitor_id):
             <div class="max-w-7xl mx-auto">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center space-x-4">
-                        <a href="/visitors" class="text-white hover:text-gray-200 transition-colors inline-flex items-center">
+                        <a href="/visitors" class="text-white/90 hover:text-white transition-colors inline-flex items-center">
                             <i class="fas fa-arrow-left text-xl mr-2"></i>Back to Visitors
                         </a>
                         <div>
                             <h1 class="text-3xl font-bold">Visitor Details</h1>
-                            <p class="text-blue-100">Complete information for {{ visitor.name }}</p>
+                            <p class="text-teal-100">Complete information for {{ visitor.name }}</p>
                         </div>
                     </div>
                     <div class="text-right">
-                        <p class="text-sm text-blue-200">Total Visits</p>
+                        <p class="text-sm text-teal-200">Total Visits</p>
                         <p class="text-2xl font-bold">{{ visitor.num_visits }}</p>
                     </div>
                 </div>
@@ -4947,7 +5170,7 @@ def visitor_detail(visitor_id):
             <!-- Main Card -->
             <div class="bg-white rounded-2xl shadow-xl border border-gray-100 overflow-hidden">
                 <!-- Visitor Header -->
-                <div class="bg-gradient-to-r from-blue-50 to-indigo-50 p-8 border-b">
+                <div class="bg-gradient-to-r from-slate-50 to-gray-100 p-8 border-b border-gray-200">
                     <div class="flex flex-col lg:flex-row items-start lg:items-center justify-between">
                         <div class="flex items-center space-x-6 mb-4 lg:mb-0">
                             <div class="relative">
@@ -4956,7 +5179,7 @@ def visitor_detail(visitor_id):
                                      alt="{{ visitor.name }}" 
                                      class="w-24 h-24 rounded-2xl object-cover border-4 border-white shadow-lg">
                                 {% else %}
-                                <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white text-2xl font-bold border-4 border-white shadow-lg">
+                                <div class="w-24 h-24 rounded-2xl bg-gradient-to-br from-teal-600 to-cyan-700 flex items-center justify-center text-white text-2xl font-bold border-4 border-white shadow-lg">
                                     {{ visitor.name[0]|upper if visitor.name and visitor.name != 'N/A' else '?' }}
                                 </div>
                                 {% endif %}
@@ -5186,7 +5409,7 @@ def visitor_detail(visitor_id):
                                 </button>
                                 {% elif visitor.status == 'Checked In' %}
                                 <button type="button" onclick="doVisitorAction('{{ visitor.id|e }}', 'checkout')"
-                                        class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                        class="w-full bg-amber-600 hover:bg-amber-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
                                     <i class="fas fa-sign-out-alt mr-2"></i> Check-out
                                 </button>
                                 {% endif %}
@@ -5195,7 +5418,7 @@ def visitor_detail(visitor_id):
                                     <i class="fas fa-print mr-2"></i> Print Record
                                 </button>
                                 <button onclick="window.location.href='/visitors'"
-                                        class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center">
+                                        class="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium py-2.5 px-4 rounded-lg transition flex items-center justify-center border border-gray-300">
                                     <i class="fas fa-arrow-left mr-2"></i> Back to Visitors
                                 </button>
                             </div>
@@ -5824,8 +6047,8 @@ def api_notify_host_time_exceeded():
     """Send a notification email to the host (employee) for a time-exceeded visitor."""
     try:
         data = request.get_json() or {}
-        visitor_id = data.get('visitor_id')
-        if not visitor_id:
+        visitor_id = str(data.get('visitor_id') or '').strip()
+        if not _is_valid_visitor_id(visitor_id):
             return jsonify({'success': False, 'message': 'visitor_id required'}), 400
         if USE_MOCK_DATA:
             all_visitors = get_mock_visitors()
@@ -6589,6 +6812,10 @@ def get_employee(emp_id):
 @app.route('/add_employee', methods=['POST'])
 def add_employee():
     data = request.get_json()
+    if not data or not isinstance(data, dict):
+        return jsonify({"success": False, "message": "Invalid JSON body"}), 400
+    if not (data.get('name') or '').strip():
+        return jsonify({"success": False, "message": "Employee name is required"}), 400
     emp_id = str(uuid.uuid4())
     if not USE_MOCK_DATA and FIREBASE_AVAILABLE:
         db.reference(f'employees/{emp_id}').set(data)
@@ -6596,16 +6823,100 @@ def add_employee():
 
 @app.route('/edit_employee/<emp_id>', methods=['POST'])
 def edit_employee(emp_id):
+    emp_id = str(emp_id or '').strip()
+    if not emp_id:
+        return jsonify({"success": False, "message": "Invalid employee id"}), 400
     data = request.get_json()
+    if not data or not isinstance(data, dict):
+        return jsonify({"success": False, "message": "Invalid JSON body"}), 400
     if not USE_MOCK_DATA and FIREBASE_AVAILABLE:
+        existing = db.reference(f'employees/{emp_id}').get()
+        if not existing:
+            return jsonify({"success": False, "message": "Employee not found"}), 404
         db.reference(f'employees/{emp_id}').update(data)
     return jsonify({"success": True})
 
 @app.route('/delete_employee/<emp_id>', methods=['POST'])
 def delete_employee(emp_id):
+    emp_id = str(emp_id or '').strip()
+    if not emp_id:
+        return jsonify({"success": False, "message": "Invalid employee id"}), 400
     if not USE_MOCK_DATA and FIREBASE_AVAILABLE:
         db.reference(f'employees/{emp_id}').delete()
     return jsonify({"success": True})
+
+# --------------------------
+# Mock Data Toggle API
+# --------------------------
+
+@app.route('/api/mock_data', methods=['GET'])
+def api_mock_data_status():
+    """Return current mock-data state and whether Firebase is available."""
+    return jsonify({
+        'mock': USE_MOCK_DATA,
+        'firebase_available': FIREBASE_AVAILABLE,
+        'firebase_initialized': FIREBASE_INITIALIZED,
+    })
+
+@app.route('/api/mock_data', methods=['POST'])
+def api_mock_data_toggle():
+    """Toggle mock data on or off at runtime. Persists to .env so it survives reloader restarts."""
+    global USE_MOCK_DATA, _MOCK_VISITORS_BASE, _MOCK_EMPLOYEES_CACHE, _mock_rooms_cache, _MOCK_BLACKLIST_STATE, _ADMIN_MOCK_SEED
+
+    body = request.get_json() or {}
+    enable = body.get('mock')
+    if enable is None:
+        enable = not USE_MOCK_DATA
+    else:
+        enable = bool(enable)
+
+    if not enable and not FIREBASE_INITIALIZED:
+        return jsonify({
+            'success': False,
+            'mock': USE_MOCK_DATA,
+            'message': 'Cannot disable mock data — Firebase is not initialized on this server.',
+        }), 400
+
+    USE_MOCK_DATA = enable
+
+    # Persist to .env so the setting survives Flask debug-reloader restarts.
+    try:
+        env_path = _admin_env_path
+        lines = []
+        if os.path.exists(env_path):
+            with open(env_path, 'r') as f:
+                lines = f.readlines()
+        found = False
+        new_val = 'true' if enable else 'false'
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith('USE_MOCK_DATA=') or stripped.startswith('USE_MOCK_DATA ='):
+                lines[i] = f'USE_MOCK_DATA={new_val}\n'
+                found = True
+                break
+        if not found:
+            lines.append(f'USE_MOCK_DATA={new_val}\n')
+        with open(env_path, 'w') as f:
+            f.writelines(lines)
+    except Exception as e:
+        print(f"[!] Could not persist USE_MOCK_DATA to .env: {e}")
+
+    if enable:
+        _MOCK_VISITORS_BASE = None
+        _MOCK_EMPLOYEES_CACHE = None
+        _mock_rooms_cache = None
+        _MOCK_BLACKLIST_STATE = {}
+        _ADMIN_MOCK_SEED = None
+        print("[*] Mock data ENABLED (caches reset — fresh data will be generated)")
+    else:
+        print("[*] Mock data DISABLED — now serving live Firebase data")
+
+    return jsonify({
+        'success': True,
+        'mock': USE_MOCK_DATA,
+        'message': f'Data source switched to {"MOCK" if USE_MOCK_DATA else "Firebase (live)"}',
+    })
+
 
 if __name__ == "__main__":
     print("\n" + "="*50)

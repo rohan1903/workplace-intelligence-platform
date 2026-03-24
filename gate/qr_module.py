@@ -185,10 +185,10 @@ def validate_qr_token(qr_data, db_ref):
     if not qr_data:
         return False, None, None, None, "No QR data provided"
 
-    visitor_id = qr_data.get("v")
-    visit_id = qr_data.get("i")
-    token = qr_data.get("k")
-    expiry_str = qr_data.get("e")
+    visitor_id = str(qr_data.get("v") or "").strip()
+    visit_id = str(qr_data.get("i") or "").strip()
+    token = str(qr_data.get("k") or "").strip()
+    expiry_str = str(qr_data.get("e") or "").strip()
 
     if not all([visitor_id, visit_id, token, expiry_str]):
         return False, None, None, None, "Incomplete QR data"
@@ -269,7 +269,12 @@ def update_qr_state(visitor_id, visit_id, new_status, db_ref,
     Returns (success: bool, error_msg: str | None)
     """
     try:
-        ref = db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}/qr_state")
+        visit_ref = db_ref.child(f"visitors/{visitor_id}/visits/{visit_id}")
+        if not visit_ref.get():
+            msg = f"Visit {visit_id} not found for visitor {visitor_id}"
+            logger.warning(msg)
+            return False, msg
+        ref = visit_ref.child("qr_state")
         current = ref.get() or {}
         cur_status = current.get("status", QR_UNUSED)
 
@@ -380,6 +385,8 @@ def find_all_face_matches(live_embedding, all_visitors, threshold=0.6):
 
     matches = []
     for vid, vdata in all_visitors.items():
+        if not isinstance(vdata, dict):
+            continue
         basic = vdata.get("basic_info", {})
         emb_str = basic.get("embedding")
         if not emb_str:

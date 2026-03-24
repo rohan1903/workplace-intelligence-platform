@@ -470,7 +470,8 @@ def verify_by_distance(live_embedding):
     matched_id = None
 
     for visitor_id, data in all_visitors.items():
-        # Get embedding from basic_info section
+        if not isinstance(data, dict):
+            continue
         basic_info = data.get("basic_info", {})
         emb_raw = basic_info.get('embedding')
         if not emb_raw:
@@ -512,6 +513,13 @@ def absolute_feedback_link(visitor_id):
     return f"{base}{rel}"
 
 
+_SENTINEL_IDS = frozenset({"null", "none", "undefined", "nan", "true", "false", ""})
+
+def _is_valid_visitor_id(vid):
+    """Reject IDs that are JS/Python sentinel values or empty."""
+    s = str(vid or "").strip()
+    return bool(s) and s.lower() not in _SENTINEL_IDS
+
 def _is_plausible_visitor_email(email):
     e = (email or "").strip().lower()
     if not e or e in ("n/a", "none", "unknown", "not provided", "no email"):
@@ -521,6 +529,8 @@ def _is_plausible_visitor_email(email):
 
 def send_feedback_email(visitor_email, visitor_name, feedback_link):
     """Send feedback request email to visitor after check-out"""
+    if not _is_plausible_visitor_email(visitor_email):
+        return False, "Invalid or missing email address"
     logger.info(f"Attempting to send feedback email to: {visitor_email}")
     
     if not all([SMTP_SERVER, SMTP_PORT, EMAIL_ADDRESS, EMAIL_PASSWORD]):
@@ -585,8 +595,8 @@ def send_feedback_email(visitor_email, visitor_name, feedback_link):
 
 def send_exceeded_email(visitor_email, visitor_name):
     """Send notification email when visitor exceeds duration limit"""
-    if not visitor_email or visitor_email == 'N/A':
-        return False, "No email address provided"
+    if not _is_plausible_visitor_email(visitor_email):
+        return False, "No valid email address provided"
         
     try:
         msg = MIMEMultipart("alternative")
@@ -638,8 +648,8 @@ def send_exceeded_email(visitor_email, visitor_name):
 
 def simulate_send_email(recipient_email, subject, body):
     """Simulates sending an email and prints the email content to the console."""
-    if recipient_email == 'N/A' or not recipient_email:
-        print("SKIPPED EMAIL: No email address provided for notification.")
+    if not _is_plausible_visitor_email(recipient_email):
+        print("SKIPPED EMAIL: No valid email address provided for notification.")
         return
         
     print("--------------------------------------------------")
@@ -658,6 +668,8 @@ def check_for_expiring_visits():
     notification_count = 0
     
     for visitor_id, data in all_visitors.items():
+        if not isinstance(data, dict):
+            continue
         if data.get('status') == 'Checked-In' and 'expected_checkout_time' in data:
             try:
                 expected_checkout = datetime.strptime(data['expected_checkout_time'], "%Y-%m-%d %H:%M:%S")
@@ -873,8 +885,11 @@ def mock_auth():
                            message="Mock auth detected mismatch between mock_face_id and QR.")
         log_qr_scan(qr_visitor_id, qr_visit_id, "rejected", db_ref,
                     reason="mock_face_mismatch", face_visitor_id=mock_face_id, ip=client_ip)
-        invalidate_qr(qr_visitor_id, qr_visit_id, "Mock mismatch detected", db_ref)
-        return jsonify({"status": "denied", "message": "Security alert: mock face does not match QR owner.", "distance": 0.21})
+        return jsonify({
+            "status": "denied",
+            "message": "Face and QR do not match. Use the correct mock visitor for this QR, then try again.",
+            "distance": 0.21,
+        })
 
     basic_info = visitor_data.get("basic_info", {})
     visitor_name = basic_info.get("name", "Visitor")
@@ -1172,7 +1187,12 @@ def checkin_verify_and_log():
                                    message="QR scanned but face matched no registered visitor")
                 log_qr_scan(qr_visitor_id, qr_visit_id, "rejected", db_ref,
                             reason="face_no_match", ip=client_ip)
-            if best_distance < 999.0 and best_distance > 2.0:
+                deny_msg = (
+                    "Incorrect face — the face presented does not match the visitor "
+                    "linked to this QR code. Please ensure the correct person is "
+                    "facing the camera, with good lighting."
+                )
+            elif best_distance < 999.0 and best_distance > 2.0:
                 deny_msg = (
                     "Face not recognized. Your face may not have been captured correctly "
                     "during registration. Please re-register with your face clearly visible."
@@ -1181,9 +1201,8 @@ def checkin_verify_and_log():
                 deny_msg = (
                     "Face not recognized. Please ensure you are facing the camera directly "
                     "with good lighting, similar to when you registered."
+                    " If you haven't registered yet, please register first."
                 )
-            if not has_qr:
-                deny_msg += " If you haven't registered yet, please register first."
             logger.info(
                 f"Face denied: best_distance={best_distance:.4f}, threshold={THRESHOLD:.2f}"
             )
@@ -1263,7 +1282,9 @@ def checkin_verify_and_log():
         # STEP D: Cross-verify QR ↔ Face
         # ──────────────────────────────────────
         if has_qr and face_visitor_id != qr_visitor_id:
-            # Face and QR belong to different people → stolen QR
+            # Face and QR belong to different people → possible stolen QR or wrong person in frame.
+            # Do not invalidate: the rightful holder must be able to retry with the same QR after
+            # a failed attempt (e.g. checkout with someone else's face visible first).
             log_security_alert("QR_FACE_MISMATCH", db_ref,
                                qr_visitor_id=qr_visitor_id,
                                face_visitor_id=face_visitor_id,
@@ -1274,23 +1295,11 @@ def checkin_verify_and_log():
             log_qr_scan(qr_visitor_id, qr_visit_id, "rejected", db_ref,
                         reason="face_mismatch", face_visitor_id=face_visitor_id, ip=client_ip)
 
-            # Decide whether to invalidate:
-            # - During check-in stage (registered/approved), keep QR usable for the legitimate owner.
-            # - During checkout stage (checked_in), invalidate to block repeated misuse.
-            qr_visit_status = str((qr_visit_data or {}).get("status", "")).strip().lower()
-            should_invalidate = qr_visit_status == "checked_in"
-            if should_invalidate:
-                invalidate_qr(qr_visitor_id, qr_visit_id,
-                              "Presented by wrong person (face mismatch)", db_ref)
-                log_protocol_event("invalidation", auth_mode, visitor_id=qr_visitor_id, visit_id=qr_visit_id,
-                                   reason="face_mismatch", face_visitor_id=face_visitor_id, ip=client_ip)
-
             return jsonify({
                 "status": "denied",
                 "message": (
-                    "Security alert: QR code does not belong to you. Security has been notified."
-                    if should_invalidate
-                    else "Face and QR do not match. Please use your own QR and face."
+                    "Face and QR do not match. Use your own QR and face, or try again if you are "
+                    "the visitor on this QR. Security has been notified."
                 ),
                 "distance": round(min_distance, 4)
             })
@@ -1770,7 +1779,7 @@ def trigger_notifications():
 @app.route("/feedback_form")
 def feedback_form():
     visitor_id = request.args.get("visitor_id")
-    if not visitor_id:
+    if not _is_valid_visitor_id(visitor_id):
         return "Missing visitor ID.", 400
     visitor_data = db_reference(f"visitors/{visitor_id}").get()
     if not visitor_data:
@@ -1782,13 +1791,16 @@ def submit_feedback():
     visitor_id = request.form.get('visitor_id')
     feedback_text = (request.form.get('feedback_text') or request.form.get('feedback_text_manual') or "").strip()
 
-    if not visitor_id:
+    if not _is_valid_visitor_id(visitor_id):
         return "Missing visitor ID.", 400
 
     if not feedback_text:
         return render_template('feedback_form.html', visitor_id=visitor_id, error="Feedback cannot be empty!")
 
     try:
+        visitor_data = db_reference(f"visitors/{visitor_id}").get()
+        if not visitor_data:
+            return "Visitor not found.", 404
         feedback_ref = db_reference(f'visitors/{visitor_id}/feedbacks')
         new_feedback_ref = feedback_ref.push()
         new_feedback_ref.set({
