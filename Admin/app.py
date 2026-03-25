@@ -3855,8 +3855,12 @@ def visitors_list():
                                         {% if visitor.status == 'Registered' or visitor.status == 'Pending Approval' %}
                                         <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'approve')" class="inline-flex items-center px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-medium" title="Approve">Approve</button>
                                         <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'reject')" class="inline-flex items-center px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-medium" title="Reject">Reject</button>
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'reschedule')" class="inline-flex items-center px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium" title="Reschedule">Reschedule</button>
                                         {% elif visitor.status == 'Approved' %}
                                         <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'checkin')" class="inline-flex items-center px-2 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs font-medium" title="Check-in">Check-in</button>
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'reschedule')" class="inline-flex items-center px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium" title="Reschedule">Reschedule</button>
+                                        {% elif visitor.status == 'Rejected' or visitor.status == 'Rescheduled' %}
+                                        <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'reschedule')" class="inline-flex items-center px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-medium" title="Reschedule">Reschedule</button>
                                         {% elif visitor.status == 'Checked In' %}
                                         <button type="button" onclick="listVisitorAction('{{ visitor.id|e }}', 'checkout')" class="inline-flex items-center px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded text-xs font-medium" title="Check-out">Check-out</button>
                                         {% endif %}
@@ -3917,10 +3921,31 @@ def visitors_list():
             }
             async function listVisitorAction(visitorId, action) {
                 var endpoint = '/visitor/' + encodeURIComponent(visitorId) + '/' + action;
-                var msg = action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : action === 'checkin' ? 'Checked in' : 'Checked out';
+                var msg = action === 'approve' ? 'Approved' : action === 'reject' ? 'Rejected' : action === 'checkin' ? 'Checked in' : action === 'reschedule' ? 'Rescheduled' : 'Checked out';
+                var payload = null;
                 if (action === 'reject' && !confirm('Reject this visitor?')) return;
+                if (action === 'reschedule') {
+                    var current = new Date().toISOString().slice(0, 10);
+                    var newDate = prompt('Enter new visit date (YYYY-MM-DD):', current);
+                    if (newDate === null) return;
+                    newDate = (newDate || '').trim();
+                    if (!newDate) { alert('New visit date is required.'); return; }
+                    if (!/^\d{4}-\d{2}-\d{2}$/.test(newDate)) {
+                        alert('Invalid date format. Use YYYY-MM-DD.');
+                        return;
+                    }
+                    var reason = prompt('Reason for rescheduling (optional):', '') || '';
+                    payload = {
+                        new_visit_date: newDate,
+                        reschedule_reason: reason.trim() || 'Rescheduled via admin dashboard'
+                    };
+                }
                 try {
-                    var r = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                    var options = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
+                    if (payload) {
+                        options.body = JSON.stringify(payload);
+                    }
+                    var r = await fetch(endpoint, options);
                     var data = r.ok ? await r.json().catch(function() { return {}; }) : null;
                     if (r.ok && (data === null || data.success !== false)) {
                         var fullMsg = msg + ' successfully.';
@@ -4701,6 +4726,61 @@ def visitor_checkout(visitor_id):
                 'check_out_time': now_str
             })
         ref.update({'status': 'Checked-Out', 'check_out_time': now_str})
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+
+@app.route('/visitor/<visitor_id>/reschedule', methods=['POST'])
+def visitor_reschedule(visitor_id):
+    """Reschedule most recent visit from admin dashboard without changing existing flows."""
+    visitor_id = str(visitor_id or '').strip()
+    if not _is_valid_visitor_id(visitor_id):
+        return jsonify({'success': False, 'message': 'Invalid visitor id'}), 400
+
+    if not request.is_json:
+        return jsonify({'success': False, 'message': 'JSON body required'}), 400
+
+    payload = request.get_json(silent=True) or {}
+    new_visit_date = str(payload.get('new_visit_date') or '').strip()
+    reschedule_reason = str(payload.get('reschedule_reason') or '').strip() or 'Rescheduled via admin dashboard'
+    if not new_visit_date:
+        return jsonify({'success': False, 'message': 'new_visit_date is required'}), 400
+    try:
+        datetime.strptime(new_visit_date, '%Y-%m-%d')
+    except ValueError:
+        return jsonify({'success': False, 'message': 'new_visit_date must be YYYY-MM-DD'}), 400
+
+    if USE_MOCK_DATA:
+        all_visitors = get_mock_visitors()
+        if visitor_id not in all_visitors:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+        return jsonify({'success': True})
+
+    try:
+        ref = db.reference(f'visitors/{visitor_id}')
+        data = ref.get()
+        if not data:
+            return jsonify({'success': False, 'message': 'Visitor not found'}), 404
+
+        visit_id, _ = _get_most_recent_visit_id(data)
+        if not visit_id:
+            return jsonify({'success': False, 'message': 'No visit found to reschedule'}), 404
+
+        now_iso = datetime.utcnow().isoformat()
+        ref.child('visits').child(visit_id).update({
+            'status': 'Rescheduled',
+            'visit_date': new_visit_date,
+            'new_visit_date': new_visit_date,
+            'reschedule_reason': reschedule_reason,
+            'rescheduled_at': now_iso,
+            'last_updated': now_iso
+        })
+        ref.update({
+            'status': 'Rescheduled',
+            'last_visit': now_iso,
+            'last_updated': now_iso
+        })
         return jsonify({'success': True})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
