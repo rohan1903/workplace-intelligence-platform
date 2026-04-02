@@ -16,7 +16,7 @@ Complete setup instructions for the Workplace Intelligence Platform with Hybrid 
 ## 1. Install Dependencies
 
 ```bash
-cd visitor-management-system
+cd workplace-intelligence-platform
 
 # Create and activate virtual environment (recommended)
 python -m venv venv

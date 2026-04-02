@@ -104,3 +104,7 @@ gate/debug_frames/
 # Team setup instructions (contains project-specific credentials)
 TEAM_SETUP_INSTRUCTIONS.txt
 
+# Local credential notes (never commit)
+credentails.txt
+credentials.local.txt
+

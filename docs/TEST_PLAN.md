@@ -1,6 +1,6 @@
 # End-to-End Test Plan
 
-Complete test plan for the Visitor Management System, covering happy paths and all edge cases. Follow the [Setup Guide](SETUP_GUIDE.md) first.
+Complete test plan for the Workplace Intelligence Platform, covering happy paths and all edge cases. Follow the [Setup Guide](SETUP_GUIDE.md) first.
 
 ---
 

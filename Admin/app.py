@@ -203,7 +203,7 @@ def _send_status_email(recipient_email, subject, paragraphs):
 
     safe_paragraphs = [str(p) for p in (paragraphs or []) if str(p).strip()]
     if not safe_paragraphs:
-        safe_paragraphs = ["This is an automated notification from the visitor management system."]
+        safe_paragraphs = ["This is an automated notification from the Workplace Intelligence Platform."]
 
     html_body = "<html><body>" + "".join(f"<p>{p}</p>" for p in safe_paragraphs) + "</body></html>"
     text_body = "\n\n".join(safe_paragraphs)
